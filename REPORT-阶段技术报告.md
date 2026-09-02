@@ -155,10 +155,57 @@ Room **version 3**（未发布版本，采用 `fallbackToDestructiveMigration` �
 
 ---
 
-## 九、交接包要求的后续审查材料
+## 十、第二轮修复（v2 交接包 F1-F5 P0）已完成
 
-- ✅ 完整源码仓库 / 提交范围：GitHub `17kevin17/vivio-course-calendar` @ `58bd219`
-- ⚠️ Room schema JSON：`exportSchema=false`，未导出（如需可临时开启）
-- ✅ 单元测试输出：`app/build/test-results/testDebugUnitTest/`（10 类 45 用例全绿）
+> 交接包：`handoff/vivo_course_calendar_integrity_handoff_v2.zip`
+> 提交范围：`f1f3bc0` ~ `686490b`
+
+### 10.1 修复清单与验证
+
+| ID | 问题 | 修复 | 验证 |
+|---|---|---|---|
+| F1 | 校内 identityKey 碰撞，136 事件被 `distinctBy` 静默丢 18 条 | 新增 `universityOccurrenceKey`（含实际日期）；`parseAndPreview` 移除 `distinctBy`，重复 key 显式标记 AMBIGUOUS + 排除 | 诊断断言 136 事件 → 136 唯一 key，碰撞组数 0 |
+| F2 | `CourseStatus.CANCELLED` 未转 DELETE | DiffEngine 先处理业务状态：已存在→CANCELLED；不存在→UNCHANGED+排除（不创建） | DiffEngine 8 用例、ImportManager 取消相关用例通过 |
+| F3 | 撤销不跳过 REVERTED、DELETE 重复 insert | `undo` 跳过 REVERTED；DELETE 重建成功即保存新 ID；UPDATE 失败标记 REVERT_FAILED | 撤销 DELETE 重建不重复创建、撤销 NOOP 不变，用例通过 |
+| F4 | `recover()` 从未接入 | `VivioApp.onCreate` IO 协程启动时执行 | RecoveryTest 覆盖启动路径调用 |
+| F5 | 恢复无法核对真实状态 | `CalendarGateway` 增加 `eventExists/getEvent`；recover 按 CREATE/UPDATE/DELETE 核对系统状态，managed_event 指向不存在事件标记 BROKEN | RecoveryTest 4 用例通过 |
+
+### 10.2 测试规模
+
+- 修复前 45 用例（10 类）→ 修复后 **56 用例（12 类）全绿**（0 fail / 0 err）
+
+### 10.3 尚未验证（真机依赖）
+
+- Release 构建在 vivo 真机解析两类样表（F10）
+- 启动恢复器在真机中断场景下的实际行为
+- vivo CalendarProvider 是否保留自定义字段（03 文档建议，未实现自定义 token 字段）
+
+---
+
+## 十一、待办（v2 P1 项 F6-F10）
+
+| ID | 问题 | 状态 |
+|---|---|---|
+| F6 | MISSING 无导入范围（学期/日期窗口） | 待办 |
+| F7 | 提醒未进入最终哈希/快照 | 待办 |
+| F8 | Calendar 时区字段不统一 | 待办 |
+| F9 | managed_event 用 REPLACE | 待办 |
+| F10 | R8 规则过宽 + Release 真机验证 | 待办 |
+
+---
+
+## 十二、可复现的已知问题（更新）
+
+1. **Kotlin daemon 连接失败**（环境相关）：已在 `gradle.properties` 固定 `kotlin.compiler.execution.strategy=in-process`，规避 daemon 连接失败。
+2. **R8 missing class**（已修复）：POI/xmlbeans 可选依赖类经 `-dontwarn` 抑制；F10 需在真机 Release 解析验证兜底。
+3. **uiautomator dump 真机不可用**：被系统 Kill（exit 137），冒烟需人工或坐标点击辅助。
+
+---
+
+## 十三、交接包要求的后续审查材料（更新）
+
+- ✅ 完整源码仓库 / 提交范围：本地 `main` @ `686490b`（GitHub 推送待网络恢复）
+- ✅ Room schema JSON：`app/schemas/com.vivio.coursecalendar.data.local.AppDatabase/3.json`（已导出）
+- ✅ 单元测试输出：`app/build/test-results/testDebugUnitTest/`（12 类 56 用例全绿）
 - ✅ Debug/Release 构建输出：app-debug.apk 24.33MB / app-release-unsigned.apk 5.79MB
 - ⏸ vivo 真机测试记录：**尚未执行完成，明确标注待办**
