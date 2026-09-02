@@ -3,7 +3,7 @@ package com.vivio.coursecalendar.domain.calendar
 import com.vivio.coursecalendar.domain.model.EventSource
 import com.vivio.coursecalendar.domain.model.UnifiedEvent
 
-/** 系统日历事件快照：用于恢复时核对真实状态（v2 F5）。 */
+/** 系统日历事件快照：用于恢复时核对真实状态（v2 F5 / N2 完整可见字段）。 */
 data class CalendarEventSnapshot(
     val calendarEventId: Long,
     val title: String?,
@@ -13,7 +13,13 @@ data class CalendarEventSnapshot(
     /** 跨存储幂等标识（v2 R2）：写入 CalendarProvider 的同步字段 */
     val operationToken: String? = null,
     /** 按 token 查询命中多条（v2 R2）：调用方应停止自动处理，标记人工确认 */
-    val ambiguousTokenMatch: Boolean = false
+    val ambiguousTokenMatch: Boolean = false,
+    /** 事件地点（N2：恢复时比较全部可见字段） */
+    val location: String? = null,
+    /** 事件描述（N2） */
+    val description: String? = null,
+    /** 规范化提醒值（N2/N9：首个提醒分钟数；null 表示无提醒） */
+    val reminderMinutes: Int? = null
 )
 
 /**
