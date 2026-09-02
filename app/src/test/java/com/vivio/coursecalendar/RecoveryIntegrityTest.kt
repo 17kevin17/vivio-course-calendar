@@ -294,4 +294,185 @@ class RecoveryIntegrityTest {
         val act = db.batchEventActionDao().getByBatch(batchId).first()
         assertEquals(BatchActionState.DB_APPLIED, act.state)
     }
+
+    // ---------- 下一阶段交接 N1-N8：真实路径失败测试 ----------
+
+    // N1：撤销 DELETE 重建 insert 前 token 必须已持久化（崩溃后可找回，不重复创建）
+    @Test
+    fun `撤销DELETE重建崩溃后token已提前落库不重复创建`() = runTest {
+        val e = event("英语", "pt001")
+        // 1) PENDING 导入 → CREATE
+        importManager.commit(preview(listOf(e)), null, emptySet())
+        assertEquals(1, gateway.events.size)
+        val insertsBeforeUndo = gateway.insertCalls // CREATE 已 insert 1 次
+        // 2) CANCELLED 导入 → DELETE（managed CANCELLED，日历 0）
+        val cancelled = e.copy(status = CourseStatus.CANCELLED)
+        val r2 = importManager.commit(preview(listOf(cancelled), mapOf("pt001" to EventState.CANCELLED)), null, emptySet())
+        assertEquals(0, gateway.events.size)
+        // 3) undo 撤销 DELETE：重建 insert 成功后崩溃
+        gateway.crashAfterNextInsert = true
+        runCatching { importManager.undo(r2.batchId) }
+        // 崩溃后：系统事件 1 条（重建成功），action 的 token 必须已持久化（N1）
+        assertEquals(1, gateway.events.size)
+        val action = db.batchEventActionDao().getByBatch(r2.batchId).first()
+        assertTrue("重建前 token 应已持久化到 action", action.operationToken != null)
+        // 4) 再次 undo → 按 token 找回，不重复创建（insert 次数不再增加）
+        importManager.undo(r2.batchId)
+        assertEquals(1, gateway.events.size)
+        assertEquals("重建只应 insert 一次", insertsBeforeUndo + 1, gateway.insertCalls)
+    }
+
+    // N2：UPDATE 只改标题，写前中断，恢复不得误判为 after（系统日历仍为 before）
+    @Test
+    fun `UPDATE只改标题写前中断恢复不得误判为after`() = runTest {
+        val before = event("英语", "pt001")
+        val cid = gateway.insertEvent(EventSource.PART_TIME, before)!!
+        val mid = insertManaged("pt001", cid)
+        val after = before.copy(title = "高数") // 同时间，仅标题变
+        val batchId = seedBatch(
+            BatchPhase.APPLYING,
+            listOf(action(BatchActionType.UPDATE, "pt001", BatchActionState.PLANNED, before = before, after = after, cidBefore = cid, mid = mid))
+        )
+
+        importManager.recover()
+
+        val act = db.batchEventActionDao().getByBatch(batchId).first()
+        assertEquals(BatchActionState.DB_APPLIED, act.state)
+        val me = db.managedEventDao().getById(mid)!!
+        assertEquals("高数", me.title)
+        val snap = gateway.getEvent(cid)!!
+        assertEquals("系统日历必须已是 after 内容（不得误判 matchesAfter）", "高数", snap.title)
+    }
+
+    // N2：UPDATE 只改提醒，写前中断，恢复后系统提醒正确
+    @Test
+    fun `UPDATE只改提醒写前中断恢复后系统提醒正确`() = runTest {
+        val before = event("英语", "pt001").copy(reminderMinutes = 10)
+        val cid = gateway.insertEvent(EventSource.PART_TIME, before)!!
+        val mid = insertManaged("pt001", cid)
+        val after = before.copy(reminderMinutes = 30) // 同时间，仅提醒变
+        val batchId = seedBatch(
+            BatchPhase.APPLYING,
+            listOf(action(BatchActionType.UPDATE, "pt001", BatchActionState.PLANNED, before = before, after = after, cidBefore = cid, mid = mid))
+        )
+
+        importManager.recover()
+
+        val act = db.batchEventActionDao().getByBatch(batchId).first()
+        assertEquals(BatchActionState.DB_APPLIED, act.state)
+        val snap = gateway.getEvent(cid)!!
+        assertEquals("系统日历提醒必须已是 after（不得误判 matchesAfter）", 30, snap.reminderMinutes)
+        val me = db.managedEventDao().getById(mid)!!
+        assertEquals(30, me.reminderMinutes)
+    }
+
+    // N3：PENDING→CANCELLED→PENDING 后撤销最后一次 UPDATE，新事件删除且 managed 恢复 CANCELLED/null
+    @Test
+    fun `恢复开课后撤销恢复CANCELLED不留孤儿事件`() = runTest {
+        val e = event("英语", "pt001")
+        // 导入 → CREATE
+        importManager.commit(preview(listOf(e)), null, emptySet())
+        // 取消 → DELETE
+        val cancelled = e.copy(status = CourseStatus.CANCELLED)
+        importManager.commit(preview(listOf(cancelled), mapOf("pt001" to EventState.CANCELLED)), null, emptySet())
+        assertEquals(0, gateway.events.size)
+        // 恢复开课 → UPDATE（重建新事件）
+        val r3 = importManager.commit(preview(listOf(e), mapOf("pt001" to EventState.MODIFIED)), null, emptySet())
+        assertEquals(1, gateway.events.size)
+        var me = db.managedEventDao().getByIdentity("PART_TIME", "pt001")!!
+        assertEquals("ACTIVE", me.status)
+        assertTrue(me.calendarEventId != null)
+
+        // 撤销恢复开课批次 → 应删除新事件，恢复 CANCELLED/null，无孤儿
+        importManager.undo(r3.batchId)
+        me = db.managedEventDao().getByIdentity("PART_TIME", "pt001")!!
+        assertEquals("撤销恢复开课后 managed 应回 CANCELLED", "CANCELLED", me.status)
+        assertEquals(null, me.calendarEventId)
+        assertEquals("新事件必须被删除，不得留孤儿", 0, gateway.events.size)
+    }
+
+    // N4：CREATE 已写 calendarEventIdAfter、未写 managed，恢复自动补映射
+    @Test
+    fun `CREATE已写cid未写managed恢复自动补映射`() = runTest {
+        val e = event("英语", "pt001")
+        val cid = gateway.insertEvent(EventSource.PART_TIME, e)!! // 系统事件已存在
+        val batchId = seedBatch(
+            BatchPhase.APPLYING,
+            listOf(action(BatchActionType.CREATE, "pt001", BatchActionState.CALENDAR_APPLIED, after = e, cidAfter = cid))
+        )
+
+        importManager.recover()
+
+        val act = db.batchEventActionDao().getByBatch(batchId).first()
+        assertEquals("应自动补写 managed 并标 DB_APPLIED", BatchActionState.DB_APPLIED, act.state)
+        val me = db.managedEventDao().getByIdentity("PART_TIME", "pt001")!!
+        assertEquals(cid, me.calendarEventId)
+        val batch = db.importBatchDao().getById(batchId)!!
+        assertEquals(BatchPhase.APPLIED, batch.phase)
+    }
+
+    // N5：撤销 CREATE 删除失败 → REVERT_FAILED + PARTIAL + 映射保留
+    @Test
+    fun `撤销CREATE删除失败REVERT_FAILED且批次PARTIAL`() = runTest {
+        val e = event("英语", "pt001")
+        val r1 = importManager.commit(preview(listOf(e)), null, emptySet())
+        assertEquals(1, gateway.events.size)
+        gateway.nextDeleteShouldFail = true
+
+        importManager.undo(r1.batchId)
+
+        val act = db.batchEventActionDao().getByBatch(r1.batchId).first()
+        assertEquals(BatchActionState.REVERT_FAILED, act.state)
+        val batch = db.importBatchDao().getById(r1.batchId)!!
+        assertEquals(BatchPhase.PARTIAL, batch.phase)
+        assertEquals("删除失败时系统事件应保留", 1, gateway.events.size)
+        val me = db.managedEventDao().getByIdentity("PART_TIME", "pt001")!!
+        assertEquals("删除失败时 managed 应保留 ACTIVE", "ACTIVE", me.status)
+    }
+
+    // N6：UPDATE 重建事件（CANCELLED→PENDING）insert 后崩溃，恢复不产生重复事件且补齐映射
+    @Test
+    fun `UPDATE重建事件崩溃后不产生重复事件且恢复补齐`() = runTest {
+        val e = event("英语", "pt001")
+        importManager.commit(preview(listOf(e)), null, emptySet())
+        val cancelled = e.copy(status = CourseStatus.CANCELLED)
+        importManager.commit(preview(listOf(cancelled), mapOf("pt001" to EventState.CANCELLED)), null, emptySet())
+        assertEquals(0, gateway.events.size)
+
+        // 恢复开课 → UPDATE 重建 insert，成功后崩溃
+        gateway.crashAfterNextInsert = true
+        runCatching { importManager.commit(preview(listOf(e), mapOf("pt001" to EventState.MODIFIED)), null, emptySet()) }
+        assertEquals(1, gateway.events.size)
+
+        // 模拟重启：把批次时间改旧，recover 补齐（不得重复创建）
+        val batch = db.importBatchDao().getLatestByFileHash("f-hash")!!
+        db.importBatchDao().update(batch.copy(createdAt = System.currentTimeMillis() - 10 * 60 * 1000L))
+        val insertsBeforeRecover = gateway.insertCalls // CREATE + 重建崩溃 各 1 次
+        importManager.recover()
+
+        assertEquals(1, gateway.events.size)
+        assertEquals("恢复不得再次 insert", insertsBeforeRecover, gateway.insertCalls)
+        val me = db.managedEventDao().getByIdentity("PART_TIME", "pt001")!!
+        assertEquals("ACTIVE", me.status)
+        assertTrue(me.calendarEventId != null)
+    }
+
+    // N8：beforeSnapshot 缺失时逆操作必须失败，不得标 REVERTED
+    @Test
+    fun `beforeSnapshot缺失时逆操作失败而不是REVERTED`() = runTest {
+        val e = event("英语", "pt001")
+        val cid = gateway.insertEvent(EventSource.PART_TIME, e)!!
+        val mid = insertManaged("pt001", cid)
+        val batchId = seedBatch(
+            BatchPhase.UNDOING,
+            listOf(action(BatchActionType.UPDATE, "pt001", BatchActionState.DB_APPLIED, after = e, cidBefore = cid, mid = mid, before = null))
+        )
+
+        importManager.undo(batchId)
+
+        val act = db.batchEventActionDao().getByBatch(batchId).first()
+        assertEquals("快照缺失不得标 REVERTED", BatchActionState.REVERT_FAILED, act.state)
+        val batch = db.importBatchDao().getById(batchId)!!
+        assertEquals(BatchPhase.PARTIAL, batch.phase)
+    }
 }

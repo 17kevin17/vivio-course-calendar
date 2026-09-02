@@ -74,7 +74,10 @@ class RecoveryTest {
                 startMillis = CourseTime.toMillis(e.startTime),
                 endMillis = CourseTime.toMillis(e.endTime),
                 eventTimezone = null,
-                operationToken = tokenByEvent[calendarEventId]
+                operationToken = tokenByEvent[calendarEventId],
+                location = e.location,
+                description = e.description,
+                reminderMinutes = e.reminderMinutes
             )
         }
         override fun findEventByOperationToken(token: String): CalendarEventSnapshot? {
@@ -139,10 +142,11 @@ class RecoveryTest {
 
         val batch = db.importBatchDao().getById(batchId)!!
         val action = db.batchEventActionDao().getByBatch(batchId).first()
-        // managed_event 未写入 → 无法补 DB_APPLIED，标记 FAILED 待人工确认
-        assertEquals(BatchActionState.FAILED, action.state)
-        // R6：存在 FAILED 动作时批次不得为 APPLIED
-        assertEquals(BatchPhase.PARTIAL, batch.phase)
+        // N4：系统事件存在且与 after 匹配 → 自动补写 managed 并标 DB_APPLIED（不得仅因 managed 缺失放弃）
+        assertEquals(BatchActionState.DB_APPLIED, action.state)
+        assertEquals(BatchPhase.APPLIED, batch.phase)
+        val me = db.managedEventDao().getByIdentity("PART_TIME", "pt001")
+        assertTrue("应自动补写 managed 映射", me != null && me.calendarEventId == cid)
     }
 
     @Test

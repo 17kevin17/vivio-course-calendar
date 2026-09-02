@@ -98,7 +98,10 @@ class FaultyCalendarGateway : CalendarGateway {
             startMillis = CourseTime.toMillis(e.startTime),
             endMillis = CourseTime.toMillis(e.endTime),
             eventTimezone = null,
-            operationToken = tokenByEvent[calendarEventId]
+            operationToken = tokenByEvent[calendarEventId],
+            location = e.location,
+            description = e.description,
+            reminderMinutes = e.reminderMinutes
         )
     }
 
