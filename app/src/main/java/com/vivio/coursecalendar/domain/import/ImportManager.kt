@@ -88,14 +88,23 @@ class ImportManager(
             is com.vivio.coursecalendar.domain.parser.ParseResult.Failure ->
                 return ParseOutcome.Error(result.message, detected)
             is com.vivio.coursecalendar.domain.parser.ParseResult.Success -> {
-                val events = result.events.map { it.withId() }.distinctBy { it.identityKey }
+                val events = result.events.map { it.withId() }
+                // v2 F1：禁止静默 distinctBy 丢弃。重复 identityKey 显式标记，不静默保留。
+                val duplicates = events.groupingBy { it.identityKey }
+                    .eachCount()
+                    .filter { it.value > 1 }
+                val warnings = result.warnings.toMutableList()
+                duplicates.forEach { (key, count) ->
+                    warnings.add("检测到 $count 条 identityKey 重复（$key），已全部保留并标记待确认")
+                }
                 val plan = diffEngine.compute(events, detected, season)
                 val items = plan.items.map { item ->
+                    val isDuplicateKey = duplicates.containsKey(item.event.identityKey)
                     PreviewItem(
                         event = item.event,
-                        state = item.state,
+                        state = if (isDuplicateKey) EventState.AMBIGUOUS else item.state,
                         conflictWith = item.conflictWith,
-                        excluded = item.excluded,
+                        excluded = item.excluded || isDuplicateKey,
                         oldMappingId = item.existingManagedId
                     )
                 }
@@ -104,7 +113,7 @@ class ImportManager(
                         source = detected,
                         season = season,
                         items = items,
-                        warnings = result.warnings + plan.warnings,
+                        warnings = warnings,
                         fileHash = fileHash,
                         fileName = fileName,
                         missing = plan.missing.map { MissingEvent(it.identityKey, it.title, it.startMillis) }

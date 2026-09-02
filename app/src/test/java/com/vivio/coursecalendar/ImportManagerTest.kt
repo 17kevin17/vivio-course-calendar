@@ -166,4 +166,37 @@ class ImportManagerTest {
         assertEquals(1, gateway.events.size)
         assertEquals("数学", gateway.events.values.first().title)
     }
+
+    @Test
+    fun `已存在事件收到取消删除系统事件并标记取消`() = runTest {
+        val e1 = event("英语", "pt001", "h1")
+        val r1 = importManager.commit(preview(listOf(e1)), null, emptySet())
+        assertEquals(1, gateway.events.size)
+
+        // 同一身份收到 CANCELLED → DELETE：删除系统事件，managed 标记取消
+        val cancelled = e1.copy(status = CourseStatus.CANCELLED)
+        val r2 = importManager.commit(
+            preview(listOf(cancelled), mapOf("pt001" to EventState.CANCELLED)),
+            null,
+            emptySet()
+        )
+        assertEquals(1, r2.deleted)
+        assertTrue("取消后系统事件应清空", gateway.events.isEmpty())
+        val me = db.managedEventDao().getAll().first()
+        assertEquals("CANCELLED", me.status)
+    }
+
+    @Test
+    fun `不存在事件收到取消不创建系统事件`() = runTest {
+        val cancelled = event("英语", "pt999", "h1").copy(status = CourseStatus.CANCELLED)
+        val r = importManager.commit(
+            preview(listOf(cancelled), mapOf("pt999" to EventState.UNCHANGED)),
+            null,
+            emptySet()
+        )
+        assertEquals(0, r.created)
+        assertEquals(0, r.deleted)
+        assertTrue("不应创建任何系统事件", gateway.events.isEmpty())
+        assertTrue("不应有 managed_event", db.managedEventDao().getAll().isEmpty())
+    }
 }

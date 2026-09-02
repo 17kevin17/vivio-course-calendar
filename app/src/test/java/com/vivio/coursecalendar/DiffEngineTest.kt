@@ -118,4 +118,21 @@ class DiffEngineTest {
         val plan = engine.compute(listOf(e), EventSource.PART_TIME, null)
         assertTrue(plan.items[0].excluded)
     }
+
+    @Test
+    fun `已存在事件收到取消标记为CANCELLED`() = runTest {
+        seedManaged("pt001", "hash-a")
+        val e = event("pt001", "hash-a").copy(status = CourseStatus.CANCELLED)
+        val plan = engine.compute(listOf(e), EventSource.PART_TIME, null)
+        assertEquals(EventState.CANCELLED, plan.items[0].state)
+    }
+
+    @Test
+    fun `不存在事件收到取消不创建系统事件`() = runTest {
+        val e = event("pt999", "hash-x").copy(status = CourseStatus.CANCELLED)
+        val plan = engine.compute(listOf(e), EventSource.PART_TIME, null)
+        // 本地不存在取消课 → 无操作且默认排除（不创建）
+        assertEquals(EventState.UNCHANGED, plan.items[0].state)
+        assertTrue(plan.items[0].excluded)
+    }
 }

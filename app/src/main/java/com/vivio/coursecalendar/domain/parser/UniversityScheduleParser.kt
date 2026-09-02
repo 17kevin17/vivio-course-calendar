@@ -92,15 +92,16 @@ class UniversityScheduleParser : ScheduleParser {
 
                 val start = LocalDateTime.of(dateCell.date, period.start)
                 val end = LocalDateTime.of(dateCell.date, period.end)
-                // 身份：学期 + 课程名 + 原始周次 + 原始节次码（一级确定性匹配）
+                // 身份：学期 + 课程名 + 实际日期 + 节次码（v2 F1 事件发生实例 key）。
+                // 同一课程同周次同节次但不同日期 → 不同身份，避免 distinctBy 静默丢事件。
                 val sectionCode = parsed.periodCode?.substringAfter('-')
                 val weekNo = parsed.periodCode?.substringBefore('-')?.toIntOrNull()
                 val identityKey = if (parsed.periodCode != null) {
-                    EventIdentity.universityIdentityKey(semester, parsed.title, weekNo, sectionCode)
+                    EventIdentity.universityOccurrenceKey(semester, parsed.title, dateCell.date, sectionCode)
                 } else {
                     // 无节次码（少见）：退化身份用日期+大节兜底，保证唯一
-                    EventIdentity.universityIdentityKey(
-                        semester, parsed.title, null, "d${dateCell.date.format(DATE_ONLY)}-$periodNo"
+                    EventIdentity.universityOccurrenceKey(
+                        semester, parsed.title, dateCell.date, "d$periodNo"
                     )
                 }
                 val contentHash = EventIdentity.universityContentHash(

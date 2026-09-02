@@ -1,6 +1,7 @@
 package com.vivio.coursecalendar.domain.import
 
 import com.vivio.coursecalendar.data.local.dao.ManagedEventDao
+import com.vivio.coursecalendar.data.local.entity.ManagedStatus
 import com.vivio.coursecalendar.domain.model.CourseStatus
 import com.vivio.coursecalendar.domain.model.EventSource
 import com.vivio.coursecalendar.domain.model.EventState
@@ -56,6 +57,12 @@ class DiffEngine(private val managedEventDao: ManagedEventDao) {
             val state = when {
                 event.blocker != null -> EventState.INVALID
                 event.identityKey.isBlank() -> EventState.INVALID
+                // v2 F2：取消状态优先于哈希比较。已存在 → CANCELLED(DELETE)；不存在 → 忽略不创建
+                event.status == CourseStatus.CANCELLED -> {
+                    val existing = managedEventDao.getByIdentity(source.name, event.identityKey)
+                    if (existing != null && existing.status != ManagedStatus.CANCELLED) EventState.CANCELLED
+                    else EventState.UNCHANGED // 已取消或不存在：无操作
+                }
                 else -> {
                     val existing = managedEventDao.getByIdentity(source.name, event.identityKey)
                     when {
@@ -65,12 +72,14 @@ class DiffEngine(private val managedEventDao: ManagedEventDao) {
                     }
                 }
             }
-            val existing = if (state == EventState.MODIFIED || state == EventState.UNCHANGED) {
+            val existing = if (state == EventState.MODIFIED || state == EventState.UNCHANGED || state == EventState.CANCELLED) {
                 managedEventDao.getByIdentity(source.name, event.identityKey)
             } else null
 
             val excluded = when {
                 event.blocker != null -> true
+                // 取消课且本地不存在：不创建任何系统事件，仅提示
+                state == EventState.UNCHANGED && event.status == CourseStatus.CANCELLED -> true
                 // 已结课兼职课：默认不写入未来日历，仅作历史
                 source == EventSource.PART_TIME && event.status == CourseStatus.COMPLETED -> true
                 else -> false

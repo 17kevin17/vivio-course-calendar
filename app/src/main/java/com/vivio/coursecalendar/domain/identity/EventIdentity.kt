@@ -34,8 +34,41 @@ object EventIdentity {
     // ---- 校内课程 ----
 
     /**
-     * 一级确定性身份：UNIVERSITY + 学期 + 规范化课程名 + 原始周次 + 原始节次码。
-     * 适合教师或教室变化（身份不变、内容变 → MODIFIED）。
+     * 事件发生实例 key（v2 交接包 F1）：UNIVERSITY + 学期 + 规范化课程名 + 实际日期 + 节次码。
+     * 同一课程在同一周、同一节次、但不同日期出现时身份不同，避免 distinctBy 静默丢事件。
+     * 教师/教室变化不进入身份（内容变 → MODIFIED）。
+     */
+    fun universityOccurrenceKey(
+        semester: String?,
+        courseName: String,
+        date: LocalDate,
+        sectionCode: String?
+    ): String = listOf(
+        "UNIVERSITY",
+        Normalizer.compact(semester),
+        Normalizer.compact(courseName),
+        date.format(DATE_FMT),
+        Normalizer.compact(sectionCode)
+    ).joinToString("|")
+
+    /**
+     * 校内事件候选匹配 key（调课候选，仅用于 MISSING 范围匹配提示）：
+     * 学期 + 课程名 + 周次。多个候选时由用户确认，不自动合并。
+     */
+    fun universityCandidateKey(
+        semester: String?,
+        courseName: String,
+        weekNo: Int?
+    ): String = listOf(
+        "UNIVERSITY",
+        Normalizer.compact(semester),
+        Normalizer.compact(courseName),
+        weekNo?.toString()
+    ).joinToString("|")
+
+    /**
+     * 校内一级确定性身份（保留）：UNIVERSITY + 学期 + 规范化课程名 + 原始周次 + 原始节次码。
+     * 用于候选匹配/周次维度识别；不再用于事件实例唯一身份。
      */
     fun universityIdentityKey(
         semester: String?,
