@@ -50,7 +50,16 @@ data class DiffPlan(
  */
 class DiffEngine(private val managedEventDao: ManagedEventDao) {
 
-    suspend fun compute(events: List<UnifiedEvent>, source: EventSource, season: Season?): DiffPlan {
+    /**
+     * 计算差异。
+     * @param scope v2 F6 导入范围：为空时不约束 MISSING 窗口（保持旧行为）。
+     */
+    suspend fun compute(
+        events: List<UnifiedEvent>,
+        source: EventSource,
+        season: Season?,
+        scope: ImportScope? = null
+    ): DiffPlan {
         val warnings = mutableListOf<String>()
 
         val items = events.map { event ->
@@ -67,6 +76,8 @@ class DiffEngine(private val managedEventDao: ManagedEventDao) {
                     val existing = managedEventDao.getByIdentity(source.name, event.identityKey)
                     when {
                         existing == null -> EventState.NEW
+                        // R5：取消课重新开课（CANCELLED → PENDING）→ 强制 MODIFIED，即使内容未变也要恢复 ACTIVE
+                        existing.status == ManagedStatus.CANCELLED -> EventState.MODIFIED
                         existing.contentHash == event.contentHash -> EventState.UNCHANGED
                         else -> EventState.MODIFIED
                     }
@@ -103,16 +114,43 @@ class DiffEngine(private val managedEventDao: ManagedEventDao) {
             else item.copy(conflictWith = conflicts[item.event.identityKey]?.conflictWith ?: emptyList())
         }
 
-        // 旧事件未出现在新文件（MISSING，仅提示）
+        // 旧事件未出现在新文件（MISSING，仅提示）。v2 F6：只在导入范围内计算。
         val newKeys = events.map { it.identityKey }.filter { it.isNotBlank() }.toSet()
         val missing = managedEventDao.getActiveBySource(source.name)
             .filter { it.identityKey !in newKeys && it.status != "CANCELLED" }
+            .filter { inScope(it, source, scope) }
             .map { MissingEventInfo(it.identityKey, it.title, it.startMillis) }
 
         if (missing.isNotEmpty()) {
-            warnings.add("${missing.size} 条旧事件未出现在新文件（仅提示，不自动删除）")
+            val scopeNote = scope?.let {
+                val window = listOfNotNull(it.dateFrom, it.dateTo).joinToString("~") { d -> d.toString() }
+                if (it.semester != null && window.isNotBlank()) "（同学期 $window 内）"
+                else if (it.semester != null) "（同学期内）"
+                else if (window.isNotBlank()) "（日期窗口 $window 内）"
+                else ""
+            } ?: ""
+            warnings.add("${missing.size} 条旧事件未出现在新文件$scopeNote（仅提示，不自动删除）")
         }
 
         return DiffPlan(withConflicts, missing, warnings)
+    }
+
+    /**
+     * F6：判定 managed 事件是否处于本次导入范围。
+     * - 校内：identityKey 必须包含同学期标识（旧学期不标 MISSING）。
+     * - 兼职：课节日期必须落在本文件最早/最晚日期窗口内。
+     */
+    private fun inScope(me: com.vivio.coursecalendar.data.local.entity.ManagedEventEntity, source: EventSource, scope: ImportScope?): Boolean {
+        if (scope == null) return true
+        val date = com.vivio.coursecalendar.domain.time.CourseTime.fromMillis(me.startMillis).toLocalDate()
+        if (scope.dateFrom != null && date.isBefore(scope.dateFrom)) return false
+        if (scope.dateTo != null && date.isAfter(scope.dateTo)) return false
+        if (source == EventSource.UNIVERSITY && !scope.semester.isNullOrBlank()) {
+            // identityKey 形如 UNIVERSITY|<semester>|...，按 "|" 分段精确比较第 2 段（学期），禁止松散 contains
+            val compacted = com.vivio.coursecalendar.domain.identity.Normalizer.compact(scope.semester)
+            val segment = me.identityKey.split("|").getOrNull(1)
+            return segment == compacted
+        }
+        return true
     }
 }

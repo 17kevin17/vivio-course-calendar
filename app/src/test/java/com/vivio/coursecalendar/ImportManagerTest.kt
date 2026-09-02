@@ -11,6 +11,7 @@ import com.vivio.coursecalendar.domain.import.DiffEngine
 import com.vivio.coursecalendar.domain.import.ImportManager
 import com.vivio.coursecalendar.domain.import.ImportPreview
 import com.vivio.coursecalendar.domain.import.PreviewItem
+import com.vivio.coursecalendar.domain.identity.EventIdentity
 import com.vivio.coursecalendar.domain.model.CourseStatus
 import com.vivio.coursecalendar.domain.model.EventSource
 import com.vivio.coursecalendar.domain.model.EventState
@@ -30,11 +31,13 @@ import kotlinx.coroutines.test.runTest
 /** 内存日历网关：模拟 CalendarProvider，便于验证导入/撤销行为。 */
 private class FakeCalendarGateway : CalendarGateway {
     val events = mutableMapOf<Long, UnifiedEvent>()
+    val tokenByEvent = mutableMapOf<Long, String?>()
     private var nextId = 1L
     override fun ensureCalendar(source: EventSource): Long = 1L
-    override fun insertEvent(source: EventSource, event: UnifiedEvent): Long? {
+    override fun insertEvent(source: EventSource, event: UnifiedEvent, operationToken: String?): Long? {
         val id = nextId++
         events[id] = event
+        tokenByEvent[id] = operationToken
         return id
     }
     override fun updateEvent(source: EventSource, calendarEventId: Long, event: UnifiedEvent): Boolean {
@@ -42,7 +45,11 @@ private class FakeCalendarGateway : CalendarGateway {
         events[calendarEventId] = event
         return true
     }
-    override fun deleteEvent(calendarEventId: Long): Boolean = events.remove(calendarEventId) != null
+    override fun deleteEvent(calendarEventId: Long): Boolean {
+        val removed = events.remove(calendarEventId) != null
+        if (removed) tokenByEvent.remove(calendarEventId)
+        return removed
+    }
     override fun eventExists(calendarEventId: Long): Boolean = events.containsKey(calendarEventId)
     override fun getEvent(calendarEventId: Long): CalendarEventSnapshot? {
         val e = events[calendarEventId] ?: return null
@@ -51,8 +58,18 @@ private class FakeCalendarGateway : CalendarGateway {
             title = e.title,
             startMillis = CourseTime.toMillis(e.startTime),
             endMillis = CourseTime.toMillis(e.endTime),
-            eventTimezone = null
+            eventTimezone = null,
+            operationToken = tokenByEvent[calendarEventId],
+            location = e.location,
+            description = e.description,
+            reminderMinutes = e.reminderMinutes
         )
+    }
+    override fun findEventByOperationToken(token: String): CalendarEventSnapshot? {
+        val ids = tokenByEvent.filterValues { it == token }.keys
+        if (ids.isEmpty()) return null
+        val first = getEvent(ids.first())!!
+        return if (ids.size > 1) first.copy(ambiguousTokenMatch = true) else first
     }
 }
 
@@ -80,14 +97,19 @@ class ImportManagerTest {
         db.close()
     }
 
-    private fun event(title: String, key: String, hash: String) = UnifiedEvent(
+    private fun event(title: String, key: String, hash: String? = null) = UnifiedEvent(
         source = EventSource.PART_TIME,
         title = title,
         startTime = LocalDateTime.of(2026, 9, 1, 20, 0),
         endTime = LocalDateTime.of(2026, 9, 1, 20, 30),
         status = CourseStatus.PENDING,
         identityKey = key,
-        contentHash = hash
+        contentHash = hash ?: EventIdentity.partTimeContentHash(
+            title = title, student = null, status = CourseStatus.PENDING.name,
+            start = LocalDateTime.of(2026, 9, 1, 20, 0),
+            end = LocalDateTime.of(2026, 9, 1, 20, 30),
+            location = null, reminderMinutes = null
+        )
     )
 
     private fun preview(events: List<UnifiedEvent>, states: Map<String, EventState> = emptyMap()) =
@@ -102,7 +124,7 @@ class ImportManagerTest {
 
     @Test
     fun `连续导入三次不新增系统事件`() = runTest {
-        val e = event("英语", "pt001", "h1")
+        val e = event("英语", "pt001")
 
         // 第一次：CREATE
         val r1 = importManager.commit(preview(listOf(e)), null, emptySet())
@@ -260,5 +282,123 @@ class ImportManagerTest {
         assertTrue(importManager.undo(r2.batchId))
         assertEquals(1, gateway.events.size)
         assertEquals("英语", gateway.events.values.first().title)
+    }
+
+    @Test
+    fun `提醒变化产生MODIFIED且managed哈希与最终提醒一致`() = runTest {
+        val e = event("英语", "pt001") // 真实解析哈希（无提醒）
+        // 首次导入：10 分钟提醒
+        val r1 = importManager.commit(preview(listOf(e)), 10, emptySet())
+        assertEquals(1, r1.created)
+        assertEquals(10, gateway.events.values.first().reminderMinutes)
+        val me1 = db.managedEventDao().getAll().first()
+        assertEquals(10, me1.reminderMinutes)
+
+        // 再次导入同一文件，预览 UNCHANGED，但提交 30 分钟 → 最终哈希变化 → 重新判定 MODIFIED(UPDATE)
+        val r2 = importManager.commit(
+            preview(listOf(e), mapOf("pt001" to EventState.UNCHANGED)),
+            30,
+            emptySet()
+        )
+        assertEquals("提醒 10→30 应产生 UPDATE", 1, r2.updated)
+        assertEquals(30, gateway.events.values.first().reminderMinutes)
+        val me2 = db.managedEventDao().getAll().first()
+        assertEquals("managed contentHash 与最终提醒一致", 30, me2.reminderMinutes)
+        assertEquals("afterSnapshot 含 30 分钟提醒", 30, gateway.events.values.first().reminderMinutes)
+
+        // 撤销 → 恢复 10 分钟提醒
+        assertTrue(importManager.undo(r2.batchId))
+        assertEquals(10, gateway.events.values.first().reminderMinutes)
+        val me3 = db.managedEventDao().getAll().first()
+        assertEquals(10, me3.reminderMinutes)
+    }
+
+    @Test
+    fun `同提醒重复导入不产生更新`() = runTest {
+        val e = event("英语", "pt001")
+        val r1 = importManager.commit(preview(listOf(e)), 10, emptySet())
+        assertEquals(1, r1.created)
+
+        // 同一文件 + 同一提醒：最终哈希与 stored 一致 → 仍为 NOOP，不新增不更新
+        val r2 = importManager.commit(
+            preview(listOf(e), mapOf("pt001" to EventState.UNCHANGED)),
+            10,
+            emptySet()
+        )
+        assertEquals(0, r2.created)
+        assertEquals(0, r2.updated)
+        assertEquals(1, gateway.events.size)
+    }
+
+    @Test
+    fun `managed_event重复插入不REPLACE重建主键`() = runTest {
+        // v2 F9：同 (source, identityKey) 重复插入应抛约束冲突（ABORT），绝不 REPLACE 重建主键。
+        val now = System.currentTimeMillis()
+        val e = com.vivio.coursecalendar.data.local.entity.ManagedEventEntity(
+            source = "PART_TIME",
+            identityKey = "pt001",
+            contentHash = "h",
+            sourceRecordId = null,
+            calendarEventId = 100L,
+            title = "课",
+            location = null,
+            description = null,
+            startMillis = now,
+            endMillis = now + 1800_000,
+            status = com.vivio.coursecalendar.data.local.entity.ManagedStatus.ACTIVE,
+            lastSeenBatchId = 1L,
+            createdAt = now,
+            updatedAt = now
+        )
+        val id1 = db.managedEventDao().insert(e)
+        var threw = false
+        try {
+            db.managedEventDao().insert(e.copy(id = 0))
+        } catch (_: Exception) {
+            threw = true
+        }
+        assertTrue("重复插入应抛约束冲突而非 REPLACE 静默重建", threw)
+        val all = db.managedEventDao().getAll()
+        assertEquals(1, all.size)
+        assertEquals("主键不得被重建", id1, all[0].id)
+    }
+
+    // ---------- R5：取消课重新开课生命周期 ----------
+
+    @Test
+    fun `取消课重新开课再取消的完整生命周期`() = runTest {
+        val e = event("英语", "pt001")
+
+        // 1) PENDING 导入 → CREATE，managed ACTIVE，日历 1
+        importManager.commit(preview(listOf(e)), null, emptySet())
+        assertEquals(1, gateway.events.size)
+        var me = db.managedEventDao().getByIdentity("PART_TIME", "pt001")!!
+        assertEquals("ACTIVE", me.status)
+
+        // 2) CANCELLED 导入 → CANCELLED/DELETE，managed CANCELLED，日历 0
+        val cancelled = e.copy(status = CourseStatus.CANCELLED)
+        val plan2 = diffEngine.compute(listOf(cancelled), EventSource.PART_TIME, null)
+        assertEquals(EventState.CANCELLED, plan2.items[0].state)
+        importManager.commit(preview(listOf(cancelled), mapOf("pt001" to EventState.CANCELLED)), null, emptySet())
+        assertEquals(0, gateway.events.size)
+        me = db.managedEventDao().getByIdentity("PART_TIME", "pt001")!!
+        assertEquals("CANCELLED", me.status)
+
+        // 3) PENDING 重新开课（同内容）→ R5：Diff 强制 MODIFIED → UPDATE 重建，managed ACTIVE，日历 1
+        val plan3 = diffEngine.compute(listOf(e), EventSource.PART_TIME, null)
+        assertEquals("CANCELLED 命中 PENDING 应强制 MODIFIED", EventState.MODIFIED, plan3.items[0].state)
+        importManager.commit(preview(listOf(e), mapOf("pt001" to EventState.MODIFIED)), null, emptySet())
+        assertEquals(1, gateway.events.size)
+        me = db.managedEventDao().getByIdentity("PART_TIME", "pt001")!!
+        assertEquals("ACTIVE", me.status)
+        assertTrue("重建后 managed 应持有新 calendarEventId", me.calendarEventId != null)
+
+        // 4) 再次取消 → DELETE，managed CANCELLED，日历 0
+        val plan4 = diffEngine.compute(listOf(cancelled), EventSource.PART_TIME, null)
+        assertEquals(EventState.CANCELLED, plan4.items[0].state)
+        importManager.commit(preview(listOf(cancelled), mapOf("pt001" to EventState.CANCELLED)), null, emptySet())
+        assertEquals(0, gateway.events.size)
+        me = db.managedEventDao().getByIdentity("PART_TIME", "pt001")!!
+        assertEquals("CANCELLED", me.status)
     }
 }

@@ -7,10 +7,13 @@ import com.vivio.coursecalendar.data.local.AppDatabase
 import com.vivio.coursecalendar.data.local.entity.ManagedEventEntity
 import com.vivio.coursecalendar.data.local.entity.ManagedStatus
 import com.vivio.coursecalendar.domain.import.DiffEngine
+import com.vivio.coursecalendar.domain.import.ImportScope
 import com.vivio.coursecalendar.domain.model.CourseStatus
 import com.vivio.coursecalendar.domain.model.EventSource
 import com.vivio.coursecalendar.domain.model.EventState
 import com.vivio.coursecalendar.domain.model.UnifiedEvent
+import com.vivio.coursecalendar.domain.time.CourseTime
+import java.time.LocalDate
 import java.time.LocalDateTime
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -134,5 +137,81 @@ class DiffEngineTest {
         // 本地不存在取消课 → 无操作且默认排除（不创建）
         assertEquals(EventState.UNCHANGED, plan.items[0].state)
         assertTrue(plan.items[0].excluded)
+    }
+
+    // ---- v2 F6 导入范围 ----
+
+    private suspend fun seedManagedAt(
+        key: String,
+        hash: String,
+        startMillis: Long,
+        status: String = ManagedStatus.ACTIVE
+    ) {
+        db.managedEventDao().insert(
+            ManagedEventEntity(
+                source = if (key.startsWith("UNIVERSITY")) "UNIVERSITY" else "PART_TIME",
+                identityKey = key,
+                contentHash = hash,
+                sourceRecordId = null,
+                calendarEventId = 100L,
+                title = "课",
+                location = null,
+                description = null,
+                startMillis = startMillis,
+                endMillis = startMillis + 1800_000,
+                status = status,
+                lastSeenBatchId = 1,
+                createdAt = startMillis,
+                updatedAt = startMillis
+            )
+        )
+    }
+
+    @Test
+    fun `兼职局部日期范围不影响范围外事件`() = runTest {
+        // 旧事件在 8 月（范围外）
+        seedManagedAt("ptOld", "h-a", CourseTime.toMillis(LocalDateTime.of(2026, 8, 1, 20, 0)))
+        val e = event("ptNew", "h-b")
+        val scope = ImportScope(dateFrom = LocalDate.of(2026, 9, 1), dateTo = LocalDate.of(2026, 9, 1))
+        val plan = engine.compute(listOf(e), EventSource.PART_TIME, null, scope)
+        assertTrue("范围外旧事件不应标 MISSING", plan.missing.isEmpty())
+    }
+
+    @Test
+    fun `兼职范围内缺失事件仍提示不自动删除`() = runTest {
+        seedManagedAt("ptOld", "h-a", CourseTime.toMillis(LocalDateTime.of(2026, 9, 1, 20, 0)))
+        val e = event("ptNew", "h-b")
+        val scope = ImportScope(dateFrom = LocalDate.of(2026, 9, 1), dateTo = LocalDate.of(2026, 9, 5))
+        val plan = engine.compute(listOf(e), EventSource.PART_TIME, null, scope)
+        assertEquals(1, plan.missing.size)
+        assertEquals("ptOld", plan.missing[0].identityKey)
+        // 仅提示，不改变 managed status
+        assertEquals(ManagedStatus.ACTIVE, db.managedEventDao().getByIdentity("PART_TIME", "ptOld")!!.status)
+    }
+
+    @Test
+    fun `导入新学期不把旧学期标成MISSING`() = runTest {
+        // 旧学期校内事件（身份含 2025-2026）
+        val oldKey = "UNIVERSITY|2025-2026|课程|20260831|0102"
+        seedManagedAt(oldKey, "h-a", CourseTime.toMillis(LocalDateTime.of(2025, 8, 31, 8, 0)))
+        // 新学期事件
+        val newKey = "UNIVERSITY|2026-2027|课程|20260901|0102"
+        val e = UnifiedEvent(
+            source = EventSource.UNIVERSITY,
+            title = "课程",
+            startTime = LocalDateTime.of(2026, 9, 1, 8, 0),
+            endTime = LocalDateTime.of(2026, 9, 1, 8, 45),
+            status = CourseStatus.PENDING,
+            identityKey = newKey,
+            contentHash = "h-b",
+            semester = "2026-2027"
+        )
+        val scope = ImportScope(
+            semester = "2026-2027",
+            dateFrom = LocalDate.of(2026, 9, 1),
+            dateTo = LocalDate.of(2026, 9, 1)
+        )
+        val plan = engine.compute(listOf(e), EventSource.UNIVERSITY, null, scope)
+        assertTrue("旧学期事件不应标 MISSING", plan.missing.isEmpty())
     }
 }

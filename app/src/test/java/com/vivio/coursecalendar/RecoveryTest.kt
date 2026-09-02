@@ -46,11 +46,13 @@ class RecoveryTest {
 
     private class FakeCal : CalendarGateway {
         val events = mutableMapOf<Long, UnifiedEvent>()
+        val tokenByEvent = mutableMapOf<Long, String?>()
         private var nextId = 1L
         override fun ensureCalendar(source: EventSource): Long = 1L
-        override fun insertEvent(source: EventSource, event: UnifiedEvent): Long? {
+        override fun insertEvent(source: EventSource, event: UnifiedEvent, operationToken: String?): Long? {
             val id = nextId++
             events[id] = event
+            tokenByEvent[id] = operationToken
             return id
         }
         override fun updateEvent(source: EventSource, calendarEventId: Long, event: UnifiedEvent): Boolean {
@@ -58,7 +60,11 @@ class RecoveryTest {
             events[calendarEventId] = event
             return true
         }
-        override fun deleteEvent(calendarEventId: Long): Boolean = events.remove(calendarEventId) != null
+        override fun deleteEvent(calendarEventId: Long): Boolean {
+            val removed = events.remove(calendarEventId) != null
+            if (removed) tokenByEvent.remove(calendarEventId)
+            return removed
+        }
         override fun eventExists(calendarEventId: Long): Boolean = events.containsKey(calendarEventId)
         override fun getEvent(calendarEventId: Long): CalendarEventSnapshot? {
             val e = events[calendarEventId] ?: return null
@@ -67,8 +73,18 @@ class RecoveryTest {
                 title = e.title,
                 startMillis = CourseTime.toMillis(e.startTime),
                 endMillis = CourseTime.toMillis(e.endTime),
-                eventTimezone = null
+                eventTimezone = null,
+                operationToken = tokenByEvent[calendarEventId],
+                location = e.location,
+                description = e.description,
+                reminderMinutes = e.reminderMinutes
             )
+        }
+        override fun findEventByOperationToken(token: String): CalendarEventSnapshot? {
+            val ids = tokenByEvent.filterValues { it == token }.keys
+            if (ids.isEmpty()) return null
+            val first = getEvent(ids.first())!!
+            return if (ids.size > 1) first.copy(ambiguousTokenMatch = true) else first
         }
     }
 
@@ -125,10 +141,12 @@ class RecoveryTest {
         importManager.recover()
 
         val batch = db.importBatchDao().getById(batchId)!!
-        assertEquals(BatchPhase.APPLIED, batch.phase)
         val action = db.batchEventActionDao().getByBatch(batchId).first()
-        // managed_event 未写入 → 无法补 DB_APPLIED，标记 FAILED 待人工确认
-        assertEquals(BatchActionState.FAILED, action.state)
+        // N4：系统事件存在且与 after 匹配 → 自动补写 managed 并标 DB_APPLIED（不得仅因 managed 缺失放弃）
+        assertEquals(BatchActionState.DB_APPLIED, action.state)
+        assertEquals(BatchPhase.APPLIED, batch.phase)
+        val me = db.managedEventDao().getByIdentity("PART_TIME", "pt001")
+        assertTrue("应自动补写 managed 映射", me != null && me.calendarEventId == cid)
     }
 
     @Test
@@ -142,6 +160,8 @@ class RecoveryTest {
         val action = db.batchEventActionDao().getByBatch(batch.id).first()
         assertEquals(BatchActionState.FAILED, action.state)
         assertTrue("不应创建新系统事件", gateway.events.isEmpty())
+        // R6：存在 FAILED 动作时批次不得为 APPLIED
+        assertEquals(BatchPhase.PARTIAL, batch.phase)
     }
 
     @Test
@@ -182,6 +202,7 @@ class RecoveryTest {
         importManager.recover()
 
         val processed = db.importBatchDao().getById(batchId)!!
-        assertTrue("UNDOING 超时批次应被处理", processed.phase == BatchPhase.APPLIED || processed.phase == BatchPhase.PARTIAL)
+        // R1：撤销方向的批次恢复后只能进入 UNDONE（或撤销失败的 PARTIAL），不得误标 APPLIED
+        assertTrue("UNDOING 超时批次应进入 UNDONE", processed.phase == BatchPhase.UNDONE || processed.phase == BatchPhase.PARTIAL)
     }
 }

@@ -31,7 +31,8 @@ object BatchActionState {
     tableName = "batch_event_action",
     indices = [
         Index(value = ["batchId", "identityKey"], unique = true),
-        Index(value = ["batchId", "state"])
+        Index(value = ["batchId", "state"]),
+        Index(value = ["operationToken"], unique = true)
     ]
 )
 data class BatchEventActionEntity(
@@ -52,5 +53,7 @@ data class BatchEventActionEntity(
     /** PLANNED / CALENDAR_APPLIED / DB_APPLIED / FAILED / REVERTED */
     val state: String,
     /** 结构化错误码 */
-    val errorCode: String?
+    val errorCode: String?,
+    /** 跨存储幂等标识（v2 R2）：调用 CalendarProvider 前写入，用于崩溃后按 token 找回 */
+    val operationToken: String? = null
 )

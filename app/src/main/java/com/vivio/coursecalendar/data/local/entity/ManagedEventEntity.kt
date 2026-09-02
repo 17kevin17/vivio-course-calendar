@@ -39,6 +39,8 @@ data class ManagedEventEntity(
     val description: String?,
     val startMillis: Long,
     val endMillis: Long,
+    /** 当前提醒（分钟，v2 F7：纳入最终哈希与快照，撤销可恢复） */
+    val reminderMinutes: Int? = null,
     /** ACTIVE / CANCELLED / MISSING / BROKEN */
     val status: String,
     val lastSeenBatchId: Long?,

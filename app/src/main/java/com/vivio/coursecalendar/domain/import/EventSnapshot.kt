@@ -34,10 +34,11 @@ object EventSnapshot {
             val o = JSONObject(json)
             UnifiedEvent(
                 source = EventSource.valueOf(o.optString("source", "UNIVERSITY")),
-                sourceRecordId = o.optString("sourceRecordId").takeIf { it.isNotBlank() },
+                // 注意：null 字段序列化为 JSONObject.NULL，反序列化必须用 isNull 判断，否则会得到字符串 "null"
+                sourceRecordId = if (o.has("sourceRecordId") && !o.isNull("sourceRecordId")) o.getString("sourceRecordId") else null,
                 title = o.optString("title"),
-                location = o.optString("location").takeIf { it.isNotBlank() },
-                description = o.optString("description").takeIf { it.isNotBlank() },
+                location = if (o.has("location") && !o.isNull("location")) o.getString("location") else null,
+                description = if (o.has("description") && !o.isNull("description")) o.getString("description") else null,
                 startTime = fromMillis(o.optLong("startMillis")),
                 endTime = fromMillis(o.optLong("endMillis")),
                 status = runCatching { CourseStatus.valueOf(o.optString("status", "PENDING")) }.getOrDefault(CourseStatus.PENDING),
