@@ -37,6 +37,20 @@ data class MissingEvent(
     val startMillis: Long
 )
 
+/**
+ * 导入范围（v2 交接包 F6）：决定 MISSING 的判定窗口。
+ * - 校内课表按学期 + 日期窗口计算 MISSING；
+ * - 兼职明细按本文件最早/最晚课节日期计算 MISSING；
+ * - 文件明确为全量导出时 isCompleteSnapshot=true；无法证明全量时只报告潜在缺失，不改变 managed status。
+ */
+data class ImportScope(
+    val semester: String? = null,
+    /** 日期窗口（含），按本地日期比较 */
+    val dateFrom: java.time.LocalDate? = null,
+    val dateTo: java.time.LocalDate? = null,
+    val isCompleteSnapshot: Boolean = false
+)
+
 /** 导入（或更新、撤销）执行后的汇总。 */
 data class CommitResult(
     val batchId: Long,

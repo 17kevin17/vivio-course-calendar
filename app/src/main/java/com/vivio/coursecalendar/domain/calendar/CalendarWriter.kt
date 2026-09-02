@@ -6,7 +6,6 @@ import android.provider.CalendarContract
 import com.vivio.coursecalendar.domain.model.EventSource
 import com.vivio.coursecalendar.domain.model.UnifiedEvent
 import com.vivio.coursecalendar.domain.time.CourseTime
-import java.time.ZoneId
 
 /**
  * 系统日历写入（交接包《04》第五、六节）。
@@ -81,8 +80,9 @@ class CalendarWriter(private val context: Context) : CalendarGateway {
             put(CalendarContract.Events.EVENT_LOCATION, event.location)
             put(CalendarContract.Events.DTSTART, millis(event.startTime))
             put(CalendarContract.Events.DTEND, millis(event.endTime))
-            put(CalendarContract.Events.EVENT_TIMEZONE, ZoneId.systemDefault().id)
-            put(CalendarContract.Events.EVENT_END_TIMEZONE, ZoneId.systemDefault().id)
+            // v2 F8：DTSTART/DTEND 解释与 EVENT_TIMEZONE 统一使用 Asia/Shanghai，避免随系统时区漂移
+            put(CalendarContract.Events.EVENT_TIMEZONE, CourseTime.ZONE.id)
+            put(CalendarContract.Events.EVENT_END_TIMEZONE, CourseTime.ZONE.id)
             put(CalendarContract.Events.STATUS, CalendarContract.Events.STATUS_CONFIRMED)
         }
         val eventId = resolver.insert(CalendarContract.Events.CONTENT_URI, values)
@@ -101,8 +101,8 @@ class CalendarWriter(private val context: Context) : CalendarGateway {
             put(CalendarContract.Events.EVENT_LOCATION, event.location)
             put(CalendarContract.Events.DTSTART, millis(event.startTime))
             put(CalendarContract.Events.DTEND, millis(event.endTime))
-            put(CalendarContract.Events.EVENT_TIMEZONE, ZoneId.systemDefault().id)
-            put(CalendarContract.Events.EVENT_END_TIMEZONE, ZoneId.systemDefault().id)
+            put(CalendarContract.Events.EVENT_TIMEZONE, CourseTime.ZONE.id)
+            put(CalendarContract.Events.EVENT_END_TIMEZONE, CourseTime.ZONE.id)
         }
         val updated = resolver.update(
             CalendarContract.Events.CONTENT_URI,

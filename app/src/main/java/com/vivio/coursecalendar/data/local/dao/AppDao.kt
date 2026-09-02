@@ -50,7 +50,9 @@ interface ImportBatchDao {
 
 @Dao
 interface ManagedEventDao {
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    // v2 F9：不用 REPLACE——冲突时 REPLACE 会删旧行重建（新主键），破坏 batch_event_action.managedEventId 引用。
+    // 明确区分：insert（默认 ABORT，NEW 事件不应冲突）/ update（同主键更新）/ upsert（按 source+identityKey 先查后写，见 ImportManager）。
+    @Insert
     suspend fun insert(event: ManagedEventEntity): Long
 
     @Update

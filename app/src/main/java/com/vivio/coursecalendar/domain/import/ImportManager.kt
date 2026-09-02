@@ -97,7 +97,9 @@ class ImportManager(
                 duplicates.forEach { (key, count) ->
                     warnings.add("检测到 $count 条 identityKey 重复（$key），已全部保留并标记待确认")
                 }
-                val plan = diffEngine.compute(events, detected, season)
+                // v2 F6：导入范围（校内同学期；兼职按本文件日期窗口），用于限定 MISSING。
+                val scope = buildImportScope(events, detected)
+                val plan = diffEngine.compute(events, detected, season, scope)
                 val items = plan.items.map { item ->
                     val isDuplicateKey = duplicates.containsKey(item.event.identityKey)
                     PreviewItem(
@@ -133,7 +135,24 @@ class ImportManager(
         reminderMinutes: Int?,
         excludedIdentityKeys: Set<String>
     ): CommitResult {
-        val targets = preview.items.filter { !it.excluded && it.event.identityKey !in excludedIdentityKeys }
+        // v2 F7：把用户确认的最终提醒应用到事件并重算哈希；提醒使哈希变化 → 重新判定为 MODIFIED。
+        // Triple(item, finalEvent, effectiveState)
+        val prepared = preview.items
+            .filter { !it.excluded && it.event.identityKey !in excludedIdentityKeys }
+            .map { item ->
+                val finalEvent = item.event.withFinalReminder(reminderMinutes)
+                val effectiveState = if (item.state == EventState.UNCHANGED) {
+                    val existing = managedEventDao.getByIdentity(preview.source.name, finalEvent.identityKey)
+                    if (existing != null && existing.contentHash != finalEvent.contentHash) {
+                        EventState.MODIFIED
+                    } else {
+                        EventState.UNCHANGED
+                    }
+                } else {
+                    item.state
+                }
+                Triple(item, finalEvent, effectiveState)
+            }
         var created = 0
         var updated = 0
         var deleted = 0
@@ -155,26 +174,25 @@ class ImportManager(
         )
         val batchId = importBatchDao.insert(batch)
 
-        // 2) 生成 PLANNED 操作落库
+        // 2) 生成 PLANNED 操作落库（基于最终事件与最终状态）
         val actionRows = mutableListOf<BatchEventActionEntity>()
-        for (item in targets) {
-            val event = item.event
-            val actionType = when (item.state) {
+        for ((item, finalEvent, state) in prepared) {
+            val actionType = when (state) {
                 EventState.NEW, EventState.CONFLICT -> BatchActionType.CREATE
                 EventState.MODIFIED -> BatchActionType.UPDATE
                 EventState.CANCELLED -> BatchActionType.DELETE
                 else -> BatchActionType.NOOP
             }
             val existing = if (actionType == BatchActionType.UPDATE || actionType == BatchActionType.DELETE) {
-                managedEventDao.getByIdentity(preview.source.name, event.identityKey)
+                managedEventDao.getByIdentity(preview.source.name, finalEvent.identityKey)
             } else null
             actionRows += BatchEventActionEntity(
                 batchId = batchId,
                 managedEventId = existing?.id,
-                identityKey = event.identityKey,
+                identityKey = finalEvent.identityKey,
                 actionType = actionType,
                 beforeSnapshot = existing?.let { EventSnapshot.toJson(it.toEvent(preview.source)) },
-                afterSnapshot = if (actionType != BatchActionType.NOOP) EventSnapshot.toJson(event) else null,
+                afterSnapshot = if (actionType != BatchActionType.NOOP) EventSnapshot.toJson(finalEvent) else null,
                 calendarEventIdBefore = existing?.calendarEventId,
                 calendarEventIdAfter = null,
                 state = BatchActionState.PLANNED,
@@ -187,10 +205,10 @@ class ImportManager(
         importBatchDao.update(batch.copy(phase = BatchPhase.APPLYING))
 
         // 4) 逐条执行
-        for ((i, item) in targets.withIndex()) {
+        for ((i, triple) in prepared.withIndex()) {
+            val (item, event, _) = triple
             val actionId = actionIds[i]
             var action = batchActionDao.getByBatch(batchId).firstOrNull { it.id == actionId } ?: continue
-            val event = item.event.copy(reminderMinutes = reminderMinutes ?: item.event.reminderMinutes)
 
             when (action.actionType) {
                 BatchActionType.CREATE -> {
@@ -203,7 +221,7 @@ class ImportManager(
                     }
                     action = action.copy(state = BatchActionState.CALENDAR_APPLIED, calendarEventIdAfter = cid)
                     batchActionDao.update(action)
-                    val newId = managedEventDao.insert(event.toManaged(preview.source, cid, batchId))
+                    val newId = upsertManaged(event.toManaged(preview.source, cid, batchId))
                     action = action.copy(managedEventId = newId, state = BatchActionState.DB_APPLIED)
                     batchActionDao.update(action)
                     created++
@@ -244,6 +262,7 @@ class ImportManager(
                             description = event.description,
                             startMillis = event.millisStart(),
                             endMillis = event.millisEnd(),
+                            reminderMinutes = event.reminderMinutes,
                             lastSeenBatchId = batchId,
                             updatedAt = System.currentTimeMillis()
                         )
@@ -272,13 +291,14 @@ class ImportManager(
         }
 
         // 5) 收尾
+        val finalUnchanged = prepared.count { it.third == EventState.UNCHANGED }
         importBatchDao.update(
             batch.copy(
                 phase = if (failed > 0) BatchPhase.PARTIAL else BatchPhase.APPLIED,
                 completedAt = System.currentTimeMillis(),
                 createdCount = created,
                 updatedCount = updated,
-                unchangedCount = preview.items.count { it.state == EventState.UNCHANGED },
+                unchangedCount = finalUnchanged,
                 invalidCount = preview.items.count { it.state == EventState.INVALID || it.excluded },
                 errorSummary = if (failed > 0) "$failed 条操作失败" else null
             )
@@ -288,7 +308,7 @@ class ImportManager(
             batchId = batchId,
             created = created,
             updated = updated,
-            unchanged = preview.items.count { it.state == EventState.UNCHANGED },
+            unchanged = finalUnchanged,
             deleted = deleted,
             invalid = preview.items.count { it.state == EventState.INVALID || it.excluded },
             failed = failed
@@ -343,6 +363,7 @@ class ImportManager(
                                     description = before.description,
                                     startMillis = before.millisStart(),
                                     endMillis = before.millisEnd(),
+                                    reminderMinutes = before.reminderMinutes,
                                     status = ManagedStatus.ACTIVE,
                                     updatedAt = System.currentTimeMillis()
                                 )
@@ -491,6 +512,7 @@ class ImportManager(
                                 description = after.description,
                                 startMillis = after.millisStart(),
                                 endMillis = after.millisEnd(),
+                                reminderMinutes = after.reminderMinutes,
                                 status = ManagedStatus.ACTIVE,
                                 updatedAt = System.currentTimeMillis()
                             )
@@ -511,6 +533,7 @@ class ImportManager(
                                     contentHash = after!!.contentHash,
                                     startMillis = after.millisStart(),
                                     endMillis = after.millisEnd(),
+                                    reminderMinutes = after.reminderMinutes,
                                     updatedAt = System.currentTimeMillis()
                                 )
                             )
@@ -565,6 +588,7 @@ class ImportManager(
             startTime = CourseTime.fromMillis(startMillis),
             endTime = CourseTime.fromMillis(endMillis),
             status = CourseStatus.PENDING,
+            reminderMinutes = reminderMinutes,
             identityKey = identityKey,
             contentHash = contentHash,
             calendarEventId = calendarEventId
@@ -583,6 +607,7 @@ class ImportManager(
             description = description,
             startMillis = millisStart(),
             endMillis = millisEnd(),
+            reminderMinutes = reminderMinutes,
             status = ManagedStatus.ACTIVE,
             lastSeenBatchId = batchId,
             createdAt = now,
@@ -590,11 +615,34 @@ class ImportManager(
         )
     }
 
+    /**
+     * v2 F9：按 (source, identityKey) 先查后写，复用已有主键，避免 REPLACE 重建主键
+     * 破坏 batch_event_action.managedEventId 对 managed_event 的引用。
+     */
+    private suspend fun upsertManaged(event: ManagedEventEntity): Long {
+        val existing = managedEventDao.getByIdentity(event.source, event.identityKey)
+        return if (existing != null) {
+            managedEventDao.update(event.copy(id = existing.id, createdAt = existing.createdAt))
+            existing.id
+        } else {
+            managedEventDao.insert(event)
+        }
+    }
+
     private fun UnifiedEvent.millisStart(): Long = CourseTime.toMillis(startTime)
 
     private fun UnifiedEvent.millisEnd(): Long = CourseTime.toMillis(endTime)
 
     private fun ImportBatchEntity.sourceOf(): EventSource = EventSource.valueOf(source)
+
+    /** F6：从解析事件构建导入范围。仅用可导入（无 blocker）事件计算日期窗口。 */
+    private fun buildImportScope(events: List<UnifiedEvent>, source: EventSource): ImportScope {
+        val usable = events.filter { it.blocker == null }
+        val dateFrom = usable.minOfOrNull { it.startTime.toLocalDate() }
+        val dateTo = usable.maxOfOrNull { it.startTime.toLocalDate() }
+        val semester = if (source == EventSource.UNIVERSITY) usable.firstNotNullOfOrNull { it.semester } else null
+        return ImportScope(semester = semester, dateFrom = dateFrom, dateTo = dateTo)
+    }
 
     companion object {
         /** 超时判定：进程中断超过该时长视为需要恢复 */
