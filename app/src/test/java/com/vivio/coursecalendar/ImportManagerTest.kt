@@ -5,6 +5,7 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.vivio.coursecalendar.data.local.AppDatabase
 import com.vivio.coursecalendar.data.repository.ScheduleRepository
+import com.vivio.coursecalendar.domain.calendar.CalendarEventSnapshot
 import com.vivio.coursecalendar.domain.calendar.CalendarGateway
 import com.vivio.coursecalendar.domain.import.DiffEngine
 import com.vivio.coursecalendar.domain.import.ImportManager
@@ -14,6 +15,7 @@ import com.vivio.coursecalendar.domain.model.CourseStatus
 import com.vivio.coursecalendar.domain.model.EventSource
 import com.vivio.coursecalendar.domain.model.EventState
 import com.vivio.coursecalendar.domain.model.UnifiedEvent
+import com.vivio.coursecalendar.domain.time.CourseTime
 import java.time.LocalDateTime
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -41,6 +43,17 @@ private class FakeCalendarGateway : CalendarGateway {
         return true
     }
     override fun deleteEvent(calendarEventId: Long): Boolean = events.remove(calendarEventId) != null
+    override fun eventExists(calendarEventId: Long): Boolean = events.containsKey(calendarEventId)
+    override fun getEvent(calendarEventId: Long): CalendarEventSnapshot? {
+        val e = events[calendarEventId] ?: return null
+        return CalendarEventSnapshot(
+            calendarEventId = calendarEventId,
+            title = e.title,
+            startMillis = CourseTime.toMillis(e.startTime),
+            endMillis = CourseTime.toMillis(e.endTime),
+            eventTimezone = null
+        )
+    }
 }
 
 /** 导入状态机：重复导入幂等、撤销 CREATE/UPDATE、撤销幂等（交接包《05》P0）。 */

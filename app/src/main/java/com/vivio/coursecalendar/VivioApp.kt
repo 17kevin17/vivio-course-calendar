@@ -29,5 +29,12 @@ class VivioApp : Application() {
         container = AppContainer(this)
         // 首次安装写入内置作息配置（春/夏）
         appScope.launch { container.scheduleRepository.seedDefaultsIfEmpty() }
+        // v2 F4：启动时执行一次故障恢复（IO 协程，不阻塞主线程）
+        appScope.launch {
+            val recovered = container.importManager.recover()
+            if (recovered > 0) {
+                android.util.Log.i("VivioApp", "启动恢复：处理 $recovered 个未完成批次")
+            }
+        }
     }
 }

@@ -127,6 +127,47 @@ class CalendarWriter(private val context: Context) : CalendarGateway {
         ) > 0
     }
 
+    /** 系统事件是否存在（v2 F5 恢复核对）。 */
+    override fun eventExists(calendarEventId: Long): Boolean {
+        resolver.query(
+            CalendarContract.Events.CONTENT_URI,
+            arrayOf(CalendarContract.Events._ID),
+            "${CalendarContract.Events._ID} = ?",
+            arrayOf(calendarEventId.toString()),
+            null
+        )?.use { return it.count > 0 }
+        return false
+    }
+
+    /** 读取系统事件快照（v2 F5 恢复核对）。 */
+    override fun getEvent(calendarEventId: Long): CalendarEventSnapshot? {
+        val projection = arrayOf(
+            CalendarContract.Events._ID,
+            CalendarContract.Events.TITLE,
+            CalendarContract.Events.DTSTART,
+            CalendarContract.Events.DTEND,
+            CalendarContract.Events.EVENT_TIMEZONE
+        )
+        resolver.query(
+            CalendarContract.Events.CONTENT_URI,
+            projection,
+            "${CalendarContract.Events._ID} = ?",
+            arrayOf(calendarEventId.toString()),
+            null
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                return CalendarEventSnapshot(
+                    calendarEventId = cursor.getLong(0),
+                    title = cursor.getString(1),
+                    startMillis = cursor.getLong(2),
+                    endMillis = cursor.getLong(3),
+                    eventTimezone = cursor.getString(4)
+                )
+            }
+        }
+        return null
+    }
+
     private fun addReminder(eventId: Long, minutes: Int) {
         val values = ContentValues().apply {
             put(CalendarContract.Reminders.EVENT_ID, eventId)

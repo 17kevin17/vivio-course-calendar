@@ -392,29 +392,167 @@ class ImportManager(
     }
 
     /**
-     * 启动恢复（交接包《04》第四节）：扫描超时未完成的 APPLYING / UNDOING 批次。
-     * 能确认完成的补记状态；无法确认的标记 FAILED，不盲目创建。
+     * 启动恢复（交接包《04》第四节，v2 F4/F5）：扫描超时未完成批次与不一致映射。
+     * 通过 CalendarGateway 核对系统真实状态，按动作类型补写/重试/标记人工确认。
      * 返回处理的批次数量。
      */
     suspend fun recover(): Int {
+        val now = System.currentTimeMillis()
         val stuck = (importBatchDao.getByPhase(BatchPhase.APPLYING) + importBatchDao.getByPhase(BatchPhase.UNDOING))
-            .filter { System.currentTimeMillis() - it.createdAt > RECOVER_TIMEOUT_MS }
+            .filter { now - it.createdAt > RECOVER_TIMEOUT_MS }
+
         for (batch in stuck) {
-            val actions = batchActionDao.getByBatchAndState(batch.id, BatchActionState.CALENDAR_APPLIED)
+            val actions = batchActionDao.getByBatch(batch.id)
+            var needsReview = false
             for (action in actions) {
-                // 日历操作已完成的：若 managed_event 已写入则补 DB_APPLIED，否则标记 FAILED 待人工确认
-                val done = action.managedEventId?.let { managedEventDao.getById(it) } != null
-                batchActionDao.update(action.copy(state = if (done) BatchActionState.DB_APPLIED else BatchActionState.FAILED))
+                if (action.state == BatchActionState.REVERTED || action.state == BatchActionState.DB_APPLIED) continue
+                when (action.actionType) {
+                    BatchActionType.CREATE -> recoverCreate(action)
+                    BatchActionType.UPDATE -> {
+                        if (recoverUpdate(batch, action) == RecoverResult.NEEDS_REVIEW) needsReview = true
+                    }
+                    BatchActionType.DELETE -> recoverDelete(action)
+                    BatchActionType.NOOP, BatchActionType.MARK_MISSING -> {
+                        batchActionDao.update(action.copy(state = BatchActionState.DB_APPLIED))
+                    }
+                }
             }
             importBatchDao.update(
                 batch.copy(
-                    phase = BatchPhase.PARTIAL,
-                    errorSummary = "进程中断，部分操作需人工确认",
+                    phase = if (needsReview) BatchPhase.PARTIAL else BatchPhase.APPLIED,
+                    errorSummary = if (needsReview) "进程中断，部分操作需人工确认" else null,
                     completedAt = System.currentTimeMillis()
                 )
             )
         }
+
+        // v2 F5：managed_event 指向不存在的系统事件 → 标记 BROKEN，待人工处理
+        val managedEvents = managedEventDao.getAll()
+        for (me in managedEvents) {
+            val cid = me.calendarEventId ?: continue
+            if (me.status == ManagedStatus.ACTIVE && !calendarWriter.eventExists(cid)) {
+                managedEventDao.update(
+                    me.copy(status = ManagedStatus.BROKEN, updatedAt = System.currentTimeMillis())
+                )
+            }
+        }
         return stuck.size
+    }
+
+    private enum class RecoverResult { OK, NEEDS_REVIEW }
+
+    /** CREATE 中断窗口：Calendar 已插入但未 DB_APPLIED。存在→补记；不存在→安全重试。 */
+    private suspend fun recoverCreate(action: BatchEventActionEntity) {
+        val cid = action.calendarEventIdAfter
+        if (cid == null) {
+            // 日历操作尚未发生：标记 FAILED（由用户重新导入），不盲目创建
+            batchActionDao.update(action.copy(state = BatchActionState.FAILED, errorCode = "RECOVER_NO_EVENT"))
+            return
+        }
+        val exists = calendarWriter.eventExists(cid)
+        if (exists) {
+            // 系统事件已存在：若 managed_event 已写入则补 DB_APPLIED，否则 FAILED 待确认
+            val done = action.managedEventId?.let { managedEventDao.getById(it) } != null
+            batchActionDao.update(action.copy(state = if (done) BatchActionState.DB_APPLIED else BatchActionState.FAILED))
+        } else {
+            // 系统事件不存在：安全重试（保留 PLANNED，交由用户重新触发导入）
+            batchActionDao.update(action.copy(state = BatchActionState.FAILED, errorCode = "RECOVER_MISSING_EVENT"))
+        }
+    }
+
+    /** UPDATE 中断窗口：与系统真实状态比对。after→补 DB；before→重试；其他→人工确认。 */
+    private suspend fun recoverUpdate(batch: ImportBatchEntity, action: BatchEventActionEntity): RecoverResult {
+        val cid = action.calendarEventIdBefore ?: return RecoverResult.NEEDS_REVIEW
+        val before = EventSnapshot.fromJson(action.beforeSnapshot)
+        val after = EventSnapshot.fromJson(action.afterSnapshot)
+        val snap = calendarWriter.getEvent(cid)
+        if (snap == null) {
+            // 系统事件已不存在：标记 BROKEN，人工处理
+            action.managedEventId?.let { mid ->
+                managedEventDao.getById(mid)?.let { me ->
+                    managedEventDao.update(me.copy(status = ManagedStatus.BROKEN, updatedAt = System.currentTimeMillis()))
+                }
+            }
+            batchActionDao.update(action.copy(state = BatchActionState.FAILED, errorCode = "RECOVER_EVENT_MISSING"))
+            return RecoverResult.NEEDS_REVIEW
+        }
+        val matchesAfter = after != null && snap.startMillis == after.millisStart() && snap.endMillis == after.millisEnd()
+        val matchesBefore = before != null && snap.startMillis == before.millisStart() && snap.endMillis == before.millisEnd()
+        return when {
+            matchesAfter -> {
+                action.managedEventId?.let { mid ->
+                    managedEventDao.getById(mid)?.let { me ->
+                        managedEventDao.update(
+                            me.copy(
+                                contentHash = after!!.contentHash,
+                                calendarEventId = cid,
+                                title = after.title,
+                                location = after.location,
+                                description = after.description,
+                                startMillis = after.millisStart(),
+                                endMillis = after.millisEnd(),
+                                status = ManagedStatus.ACTIVE,
+                                updatedAt = System.currentTimeMillis()
+                            )
+                        )
+                    }
+                }
+                batchActionDao.update(action.copy(state = BatchActionState.DB_APPLIED))
+                RecoverResult.OK
+            }
+            matchesBefore -> {
+                // 系统仍是旧状态：安全重试 UPDATE
+                val ok = calendarWriter.updateEvent(batch.sourceOf(), cid, after ?: return RecoverResult.NEEDS_REVIEW)
+                if (ok) {
+                    action.managedEventId?.let { mid ->
+                        managedEventDao.getById(mid)?.let { me ->
+                            managedEventDao.update(
+                                me.copy(
+                                    contentHash = after!!.contentHash,
+                                    startMillis = after.millisStart(),
+                                    endMillis = after.millisEnd(),
+                                    updatedAt = System.currentTimeMillis()
+                                )
+                            )
+                        }
+                    }
+                    batchActionDao.update(action.copy(state = BatchActionState.DB_APPLIED))
+                    RecoverResult.OK
+                } else {
+                    batchActionDao.update(action.copy(state = BatchActionState.FAILED, errorCode = "RECOVER_UPDATE_FAILED"))
+                    RecoverResult.NEEDS_REVIEW
+                }
+            }
+            else -> {
+                // 第三种状态：不自动覆盖
+                batchActionDao.update(action.copy(state = BatchActionState.FAILED, errorCode = "RECOVER_NEEDS_REVIEW"))
+                RecoverResult.NEEDS_REVIEW
+            }
+        }
+    }
+
+    /** DELETE 中断窗口：系统事件存在→重试删除；不存在→补写取消状态。 */
+    private suspend fun recoverDelete(action: BatchEventActionEntity) {
+        val cid = action.calendarEventIdBefore
+        if (cid == null) {
+            batchActionDao.update(action.copy(state = BatchActionState.DB_APPLIED))
+            return
+        }
+        val exists = calendarWriter.eventExists(cid)
+        if (exists) {
+            calendarWriter.deleteEvent(cid)
+            batchActionDao.update(action.copy(state = BatchActionState.DB_APPLIED))
+        } else {
+            // 系统事件已不存在：补写 managed 取消状态
+            action.managedEventId?.let { mid ->
+                managedEventDao.getById(mid)?.let { me ->
+                    managedEventDao.update(
+                        me.copy(status = ManagedStatus.CANCELLED, calendarEventId = null, updatedAt = System.currentTimeMillis())
+                    )
+                }
+            }
+            batchActionDao.update(action.copy(state = BatchActionState.DB_APPLIED))
+        }
     }
 
     private fun ManagedEventEntity.toEvent(source: EventSource): UnifiedEvent =
