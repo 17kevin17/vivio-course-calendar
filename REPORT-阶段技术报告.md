@@ -14,7 +14,7 @@
 | 分支 | `wip/f6-f10`（本地，未推送） |
 | HEAD SHA | `05cc2d97aebbad942be519b90db10710fe82075a` |
 | Room schema | **v5**（`app/schemas/.../5.json`） |
-| 测试规模 | **13 类 / 71 用例**，全绿（0 fail / 0 err） |
+| 测试规模 | **14 类 / 82 用例**，全绿（0 fail / 0 err） |
 | Debug 构建 | `assembleDebug` BUILD SUCCESSFUL，app-debug.apk **24.34 MB** |
 | Release 构建 | `assembleRelease` BUILD SUCCESSFUL（R8 + 资源收缩），app-release-unsigned.apk **5.80 MB** |
 | R8 缺失类告警 | **0**（700 条精确 `-dontwarn`，来源 `missing_rules.txt`）；仅剩 1 条非阻断类型检查告警（`SVGUserAgent.getViewbox()`） |
@@ -40,7 +40,7 @@
 | 恢复器接入启动（F4）：VivioApp.onCreate → recover() | ✅ | RecoveryTest |
 | 恢复核对真实状态（F5）：eventExists/getEvent 三路径 | ✅ | RecoveryTest |
 | 导入范围（F6）：MISSING 按学期/日期窗口；学期段**精确匹配**（非松散 contains） | ✅ | DiffEngineTest（导入新学期/局部日期范围） |
-| 提醒进入最终哈希/快照（F7）：改提醒→MODIFIED、撤销恢复；**三态语义明确（null=显式关闭）** | ✅ | ImportManagerTest（提醒变化/同提醒重复/撤销恢复提醒） |
+| 提醒进入最终哈希/快照（F7）：改提醒→MODIFIED、撤销恢复；**两态最终值语义（null=显式关闭、Int=分钟值）** | ✅ | ImportManagerTest（提醒变化/同提醒重复/撤销恢复提醒） |
 | 时区统一（F8）：DTSTART/DTEND 与 EVENT_TIMEZONE/END 均 Asia/Shanghai | ✅ | CalendarWriter 字段核对 |
 | managed_event 去 REPLACE（F9）：insert/update/upsert 明确，主键不重建 | ✅ | ImportManagerTest（重复插入不重建主键） |
 | R8 规则收窄（F10 前半）：700 精确类，缺失类告警 0 | ✅ | Release 构建输出（missing_rules.txt 不再生成） |
@@ -52,6 +52,18 @@
 | R6：批次阶段集中汇总；FAILED 动作不得让批次 APPLIED/UNDONE | ✅ | RecoveryIntegrityTest（recoverCreate FAILED 批次 PARTIAL） |
 | 恢复幂等：连续调用 recover 三次不增删事件 | ✅ | RecoveryIntegrityTest |
 | commit 批次阶段更新主键修复（新发现 bug：`batch.copy` 缺 id 致 phase 静默不更新） | ✅ | RecoveryIntegrityTest（崩溃重启恢复） |
+| N1：所有 insert 路径 token 在调用 CalendarProvider 前持久化（CREATE/UPDATE 重建/DELETE 撤销重建） | ✅ | RecoveryIntegrityTest（撤销DELETE重建崩溃后 token 已落库不重复创建） |
+| N2：UPDATE 恢复比较全部日历可见字段 + 提醒（标题/地点/提醒-only 不误判） | ✅ | RecoveryIntegrityTest（UPDATE只改标题/只改提醒写前中断） |
+| N3：撤销“恢复开课”删除新事件、恢复 CANCELLED/null，不留孤儿 | ✅ | RecoveryIntegrityTest（恢复开课后撤销恢复CANCELLED不留孤儿） |
+| N4：CREATE 已写 cid 未写 managed 时恢复自动补写映射 | ✅ | RecoveryIntegrityTest（CREATE已写cid未写managed恢复自动补映射）；RecoveryTest |
+| N5：撤销 CREATE 删除后核验；失败→REVERT_FAILED + PARTIAL + 映射保留 | ✅ | RecoveryIntegrityTest（撤销CREATE删除失败） |
+| N6：UPDATE 重建路径（无 cid）经统一幂等入口，崩溃后不重复创建 | ✅ | RecoveryIntegrityTest（UPDATE重建事件崩溃后不产生重复事件） |
+| N7：undo() 返回值与批次最终状态一致（仅 UNDONE 返回成功） | ✅ | undo 返回 phase==UNDONE；RecoveryIntegrityTest |
+| N8：beforeSnapshot 缺失时逆操作 REVERT_FAILED/SNAPSHOT_MISSING，不标成功 | ✅ | RecoveryIntegrityTest（beforeSnapshot缺失时逆操作失败） |
+| N9：提醒成为可核验状态（getEvent 回读提醒；updateEvent 回读核验） | ✅ | CalendarWriter；CalendarEventSnapshot.reminderMinutes |
+| N10：删除不提前破坏提醒（依赖 Provider 级联） | ✅ | CalendarWriter.deleteEvent |
+| N11：token 查询限定本应用日历（避免扫描其他账户） | ✅ | CalendarWriter.findEventByOperationToken |
+| 压力回归：同一文件导入 20 次稳定；取消/恢复/撤销循环 10 次无孤儿；recover 10 次不漂移 | ✅ | StressTest |
 
 ---
 
