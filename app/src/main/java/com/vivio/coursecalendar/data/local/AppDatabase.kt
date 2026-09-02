@@ -21,7 +21,7 @@ import com.vivio.coursecalendar.data.local.entity.ScheduleConfigEntity
         BatchEventActionEntity::class
     ],
     version = 3,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun scheduleConfigDao(): ScheduleConfigDao

@@ -15,6 +15,11 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+
+        // 导出 Room schema JSON 供审查（交接包要求提供 schema 材料）
+        ksp {
+            arg("room.schemaLocation", "$projectDir/schemas")
+        }
     }
 
     buildTypes {
