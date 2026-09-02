@@ -199,4 +199,53 @@ class ImportManagerTest {
         assertTrue("不应创建任何系统事件", gateway.events.isEmpty())
         assertTrue("不应有 managed_event", db.managedEventDao().getAll().isEmpty())
     }
+
+    @Test
+    fun `撤销DELETE重建事件且不重复创建`() = runTest {
+        val e1 = event("英语", "pt001", "h1")
+        val r1 = importManager.commit(preview(listOf(e1)), null, emptySet())
+        assertEquals(1, gateway.events.size)
+
+        // 标记 CANCELLED → DELETE 批次，删除系统事件
+        val cancelled = e1.copy(status = CourseStatus.CANCELLED)
+        val r2 = importManager.commit(
+            preview(listOf(cancelled), mapOf("pt001" to EventState.CANCELLED)),
+            null,
+            emptySet()
+        )
+        assertEquals(1, r2.deleted)
+        assertTrue(gateway.events.isEmpty())
+
+        // 撤销 DELETE → 重建原事件
+        assertTrue(importManager.undo(r2.batchId))
+        assertEquals("重建后应有 1 个事件", 1, gateway.events.size)
+        val rebuiltId = gateway.events.keys.first()
+
+        // F3：再次 undo（或中断重试）不得重复创建；已 REVERTED 动作跳过
+        assertTrue(importManager.undo(r2.batchId))
+        assertEquals("重复撤销不得再次创建", 1, gateway.events.size)
+        assertEquals("重复撤销不得更换事件 ID", rebuiltId, gateway.events.keys.first())
+        // managed_event 恢复 ACTIVE 且指向新 ID
+        val me = db.managedEventDao().getAll().first()
+        assertEquals("ACTIVE", me.status)
+        assertEquals(rebuiltId, me.calendarEventId)
+    }
+
+    @Test
+    fun `撤销NOOP不修改事件`() = runTest {
+        val e1 = event("英语", "pt001", "h1")
+        val r1 = importManager.commit(preview(listOf(e1)), null, emptySet())
+
+        // 再次导入同内容 → UNCHANGED (NOOP)
+        val r2 = importManager.commit(
+            preview(listOf(e1), mapOf("pt001" to EventState.UNCHANGED)),
+            null,
+            emptySet()
+        )
+        assertEquals(1, gateway.events.size)
+        // 撤销 NOOP 批次：事件保持不变
+        assertTrue(importManager.undo(r2.batchId))
+        assertEquals(1, gateway.events.size)
+        assertEquals("英语", gateway.events.values.first().title)
+    }
 }

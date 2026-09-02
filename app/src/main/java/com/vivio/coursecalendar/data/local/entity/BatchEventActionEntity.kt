@@ -20,6 +20,7 @@ object BatchActionState {
     const val DB_APPLIED = "DB_APPLIED"
     const val FAILED = "FAILED"
     const val REVERTED = "REVERTED"
+    const val REVERT_FAILED = "REVERT_FAILED"
 }
 
 /**

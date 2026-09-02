@@ -298,6 +298,7 @@ class ImportManager(
     /**
      * 撤销某次导入（交接包《04》第三节）：按动作类型逆操作。
      * CREATE → 删除；UPDATE → 用 beforeSnapshot 恢复；DELETE → 重建。
+     * v2 F3：只处理未 REVERTED 的动作，中断后重试幂等，不重复创建/误删。
      */
     suspend fun undo(batchId: Long): Boolean {
         val batch = importBatchDao.getById(batchId) ?: return false
@@ -306,16 +307,31 @@ class ImportManager(
 
         val actions = batchActionDao.getByBatch(batchId).sortedByDescending { it.id }
         for (action in actions) {
+            // v2 F3：已恢复的动作跳过，中断后可安全重试
+            if (action.state == BatchActionState.REVERTED) continue
             when (action.actionType) {
                 BatchActionType.CREATE -> {
+                    // 删除系统事件；已不存在视为幂等成功
                     action.calendarEventIdAfter?.let { calendarWriter.deleteEvent(it) }
-                    action.managedEventId?.let { managedEventDao.getById(it) }?.let { managedEventDao.delete(it) }
+                    // 仅当 managed_event 仍指向本动作创建的事件时才删除
+                    action.managedEventId?.let { mid ->
+                        val me = managedEventDao.getById(mid)
+                        if (me != null && me.calendarEventId == action.calendarEventIdAfter) {
+                            managedEventDao.delete(me)
+                        }
+                    }
                 }
                 BatchActionType.UPDATE -> {
                     val before = EventSnapshot.fromJson(action.beforeSnapshot)
                     if (before != null) {
                         val cid = action.calendarEventIdBefore
-                        if (cid != null) calendarWriter.updateEvent(batch.sourceOf(), cid, before)
+                        if (cid != null) {
+                            val ok = calendarWriter.updateEvent(batch.sourceOf(), cid, before)
+                            if (!ok) {
+                                batchActionDao.update(action.copy(state = BatchActionState.REVERT_FAILED))
+                                continue
+                            }
+                        }
                         val me = action.managedEventId?.let { managedEventDao.getById(it) }
                         if (me != null) {
                             managedEventDao.update(
@@ -337,21 +353,35 @@ class ImportManager(
                 BatchActionType.DELETE -> {
                     val before = EventSnapshot.fromJson(action.beforeSnapshot)
                     if (before != null) {
-                        val newCid = calendarWriter.insertEvent(batch.sourceOf(), before)
-                        val me = action.managedEventId?.let { managedEventDao.getById(it) }
-                        if (me != null) {
-                            managedEventDao.update(
-                                me.copy(
-                                    status = ManagedStatus.ACTIVE,
-                                    calendarEventId = newCid,
-                                    updatedAt = System.currentTimeMillis()
+                        // 已保存恢复后的新 ID：不再次创建（F3 幂等）
+                        val existingCid = action.calendarEventIdAfter
+                        val newCid = if (existingCid != null) {
+                            existingCid
+                        } else {
+                            val cid = calendarWriter.insertEvent(batch.sourceOf(), before)
+                            if (cid != null) {
+                                // 首次重建成功立即保存新 ID，避免中断后重复 insert
+                                batchActionDao.update(action.copy(calendarEventIdAfter = cid))
+                            }
+                            cid
+                        }
+                        if (newCid != null) {
+                            val me = action.managedEventId?.let { managedEventDao.getById(it) }
+                            if (me != null) {
+                                managedEventDao.update(
+                                    me.copy(
+                                        status = ManagedStatus.ACTIVE,
+                                        calendarEventId = newCid,
+                                        updatedAt = System.currentTimeMillis()
+                                    )
                                 )
-                            )
+                            }
                         }
                     }
                 }
                 BatchActionType.NOOP, BatchActionType.MARK_MISSING -> Unit
             }
+            // 逆操作成功（或本动作本就无需操作）→ 立即标记 REVERTED
             batchActionDao.update(action.copy(state = BatchActionState.REVERTED))
         }
 
