@@ -22,9 +22,8 @@ object ConflictDetector {
             for (j in i + 1 until candidates.size) {
                 val b = candidates[j]
                 if (!a.startTime.isBefore(b.endTime) || !b.startTime.isBefore(a.endTime)) continue
-                // 同一来源且非兼职/校内互撞的重复展示：仍标记，便于用户发现
-                val keyA = a.eventFingerprint
-                val keyB = b.eventFingerprint
+                val keyA = a.identityKey
+                val keyB = b.identityKey
                 map.mergeConflict(keyA, b.displayTitle())
                 map.mergeConflict(keyB, a.displayTitle())
             }

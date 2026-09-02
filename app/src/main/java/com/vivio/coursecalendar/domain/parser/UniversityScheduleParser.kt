@@ -1,6 +1,6 @@
 package com.vivio.coursecalendar.domain.parser
 
-import com.vivio.coursecalendar.domain.import.EventFingerprint
+import com.vivio.coursecalendar.domain.identity.EventIdentity
 import com.vivio.coursecalendar.domain.model.CourseStatus
 import com.vivio.coursecalendar.domain.model.EventSource
 import com.vivio.coursecalendar.domain.model.UnifiedEvent
@@ -40,6 +40,7 @@ class UniversityScheduleParser : ScheduleParser {
         // 学年推断：从标题（如「陈志杰2026-2027-1课表」）提取学年。
         // 日期缺少年份时：月份 >=9 取第一年，否则取第二年；无学年信息则不猜测。
         val yearPair = findSemesterYears(sheet, merged)
+        val semester = yearPair?.let { "${it.first}-${it.second}" }
 
         // 1. 定位日期行（区块列头）：一行中 >=2 个可解析的日期
         val dateRows = mutableListOf<Pair<Int, Map<Int, DateCell>>>()
@@ -91,7 +92,26 @@ class UniversityScheduleParser : ScheduleParser {
 
                 val start = LocalDateTime.of(dateCell.date, period.start)
                 val end = LocalDateTime.of(dateCell.date, period.end)
-                val fp = EventFingerprint.university(start, periodNo, parsed.title, parsed.location)
+                // 身份：学期 + 课程名 + 原始周次 + 原始节次码（一级确定性匹配）
+                val sectionCode = parsed.periodCode?.substringAfter('-')
+                val weekNo = parsed.periodCode?.substringBefore('-')?.toIntOrNull()
+                val identityKey = if (parsed.periodCode != null) {
+                    EventIdentity.universityIdentityKey(semester, parsed.title, weekNo, sectionCode)
+                } else {
+                    // 无节次码（少见）：退化身份用日期+大节兜底，保证唯一
+                    EventIdentity.universityIdentityKey(
+                        semester, parsed.title, null, "d${dateCell.date.format(DATE_ONLY)}-$periodNo"
+                    )
+                }
+                val contentHash = EventIdentity.universityContentHash(
+                    title = parsed.title,
+                    teacher = parsed.teacher,
+                    location = parsed.location,
+                    start = start,
+                    end = end,
+                    reminderMinutes = null,
+                    status = CourseStatus.PENDING.name
+                )
                 events += UnifiedEvent(
                     source = EventSource.UNIVERSITY,
                     title = parsed.title,
@@ -105,11 +125,14 @@ class UniversityScheduleParser : ScheduleParser {
                     endTime = end,
                     status = CourseStatus.PENDING,
                     sourceFileHash = context.sourceFileHash,
-                    eventFingerprint = fp,
+                    identityKey = identityKey,
+                    contentHash = contentHash,
                     rawText = text,
                     periodIndex = periodNo,
                     weekRange = parsed.weekRange,
                     periodCode = parsed.periodCode,
+                    weekNo = weekNo,
+                    semester = semester,
                     blocker = if (dateCell.hasYear) null else "日期缺少年份，请确认（原始：${rawDateText(sheet, nearest.first, col, merged)}）"
                 )
             }
@@ -176,6 +199,7 @@ class UniversityScheduleParser : ScheduleParser {
 
     private val dateWithYear = Regex("(\\d{4})\\s*[年/\\\\-]\\s*(\\d{1,2})\\s*[月/\\\\-]\\s*(\\d{1,2})\\s*日?")
     private val dateWithoutYear = Regex("(\\d{1,2})\\s*[月/\\\\-]\\s*(\\d{1,2})\\s*日?")
+    private val DATE_ONLY = java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd")
 
     /** 从标题（如「陈志杰2026-2027-1课表」）提取学年起止年份。 */
     private val semesterYearsPattern = Regex("(\\d{4})\\s*[-—]\\s*(\\d{4})")

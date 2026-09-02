@@ -5,6 +5,7 @@ import android.content.Context
 import android.provider.CalendarContract
 import com.vivio.coursecalendar.domain.model.EventSource
 import com.vivio.coursecalendar.domain.model.UnifiedEvent
+import com.vivio.coursecalendar.domain.time.CourseTime
 import java.time.ZoneId
 
 /**
@@ -13,7 +14,7 @@ import java.time.ZoneId
  * 创建两个独立日历：校内课程 / 兼职课程；事件按统一事件模型映射。
  * 只更新或删除本应用记录过映射关系的事件；不依赖隐藏 vivo API。
  */
-class CalendarWriter(private val context: Context) {
+class CalendarWriter(private val context: Context) : CalendarGateway {
 
     private val resolver = context.contentResolver
 
@@ -30,7 +31,7 @@ class CalendarWriter(private val context: Context) {
     }
 
     /** 查找或创建对应来源的独立日历。 */
-    fun ensureCalendar(source: EventSource): Long {
+    override fun ensureCalendar(source: EventSource): Long {
         val displayName = calendarDisplayName(source)
         findCalendar(displayName)?.let { return it }
 
@@ -41,7 +42,7 @@ class CalendarWriter(private val context: Context) {
             put(CalendarContract.Calendars.CALENDAR_COLOR, calendarColor(source))
             put(CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL, CalendarContract.Calendars.CAL_ACCESS_OWNER)
             put(CalendarContract.Calendars.OWNER_ACCOUNT, accountName)
-            put(CalendarContract.Calendars.CALENDAR_TIME_ZONE, ZoneId.systemDefault().id)
+            put(CalendarContract.Calendars.CALENDAR_TIME_ZONE, CourseTime.ZONE.id)
             put(CalendarContract.Calendars.SYNC_EVENTS, 0)
             put(CalendarContract.Calendars.VISIBLE, 1)
         }
@@ -69,7 +70,7 @@ class CalendarWriter(private val context: Context) {
     }
 
     /** 创建事件，返回系统日历事件 ID；失败返回 null。 */
-    fun insertEvent(source: EventSource, event: UnifiedEvent): Long? {
+    override fun insertEvent(source: EventSource, event: UnifiedEvent): Long? {
         val calendarId = ensureCalendar(source)
         if (calendarId < 0) return null
 
@@ -93,7 +94,7 @@ class CalendarWriter(private val context: Context) {
     }
 
     /** 更新事件（含时间、标题、地点、描述），并重建提醒。 */
-    fun updateEvent(source: EventSource, calendarEventId: Long, event: UnifiedEvent): Boolean {
+    override fun updateEvent(source: EventSource, calendarEventId: Long, event: UnifiedEvent): Boolean {
         val values = ContentValues().apply {
             put(CalendarContract.Events.TITLE, event.title)
             put(CalendarContract.Events.DESCRIPTION, event.description)
@@ -117,7 +118,7 @@ class CalendarWriter(private val context: Context) {
     }
 
     /** 删除事件（仅用于本应用有映射的事件）。 */
-    fun deleteEvent(calendarEventId: Long): Boolean {
+    override fun deleteEvent(calendarEventId: Long): Boolean {
         removeReminders(calendarEventId)
         return resolver.delete(
             CalendarContract.Events.CONTENT_URI,
@@ -143,6 +144,5 @@ class CalendarWriter(private val context: Context) {
         )
     }
 
-    private fun millis(t: java.time.LocalDateTime): Long =
-        t.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+    private fun millis(t: java.time.LocalDateTime): Long = CourseTime.toMillis(t)
 }

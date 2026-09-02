@@ -108,11 +108,7 @@ fun ImportScreen(onBack: () -> Unit) {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_CALENDAR) != PackageManager.PERMISSION_GRANTED) {
             needed += Manifest.permission.WRITE_CALENDAR
         }
-        if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            needed += Manifest.permission.POST_NOTIFICATIONS
-        }
+        // T11：只使用系统日历 Reminders 时，不因本 App 提醒申请通知权限（POST_NOTIFICATIONS）
         if (needed.isEmpty()) {
             viewModel.confirmImport()
         } else {
@@ -158,7 +154,7 @@ fun ImportScreen(onBack: () -> Unit) {
                 )
                 is ImportUiState.PreviewReady -> PreviewContent(
                     preview = s.preview,
-                    excludedSet = viewModel.excludedFingerprints(),
+                    excludedSet = viewModel.excludedIdentityKeys(),
                     onToggle = { viewModel.toggleExclude(it) },
                     onReminder = { viewModel.onReminderChosen(it) },
                     onConfirm = { requestPermissionsAndConfirm() }
@@ -280,11 +276,11 @@ private fun PreviewContent(
             contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            items(preview.items, key = { it.event.id.ifBlank { it.event.eventFingerprint } }) { item ->
+            items(preview.items, key = { it.event.id.ifBlank { it.event.identityKey } }) { item ->
                 PreviewItemRow(
                     item = item,
-                    excluded = item.event.eventFingerprint in excludedSet,
-                    onToggle = { onToggle(item.event.eventFingerprint) }
+                    excluded = item.event.identityKey in excludedSet,
+                    onToggle = { onToggle(item.event.identityKey) }
                 )
             }
         }
@@ -307,7 +303,7 @@ private fun PreviewContent(
             }
             Spacer(Modifier.height(12.dp))
             Button(onClick = onConfirm, modifier = Modifier.fillMaxWidth()) {
-                Text("确认导入（${preview.items.count { it.event.eventFingerprint !in excludedSet && it.event.blocker == null }} 条）")
+                Text("确认导入（${preview.items.count { it.event.identityKey !in excludedSet && it.event.blocker == null }} 条）")
             }
         }
     }
@@ -413,6 +409,7 @@ private fun stateLabel(state: EventState): String = when (state) {
     EventState.MODIFIED -> "更新"
     EventState.CANCELLED -> "取消"
     EventState.MISSING -> "缺失"
+    EventState.AMBIGUOUS -> "待确认"
     EventState.CONFLICT -> "冲突"
     EventState.INVALID -> "异常"
 }
@@ -474,7 +471,7 @@ private fun FailedContent(message: String, onBack: () -> Unit) {
 }
 
 // ViewModel 暴露辅助：预览页读取当前排除集合
-fun ImportViewModel.excludedFingerprints(): Set<String> {
+fun ImportViewModel.excludedIdentityKeys(): Set<String> {
     val s = state.value as? ImportUiState.PreviewReady ?: return emptySet()
-    return s.preview.items.filter { it.excluded }.map { it.event.eventFingerprint }.toSet()
+    return s.preview.items.filter { it.excluded }.map { it.event.identityKey }.toSet()
 }

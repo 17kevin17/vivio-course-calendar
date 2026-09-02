@@ -1,6 +1,6 @@
 package com.vivio.coursecalendar
 
-import com.vivio.coursecalendar.domain.import.EventFingerprint
+import com.vivio.coursecalendar.domain.identity.EventIdentity
 import com.vivio.coursecalendar.domain.model.CourseStatus
 import com.vivio.coursecalendar.domain.model.EventSource
 import com.vivio.coursecalendar.domain.parser.ExcelIO
@@ -85,10 +85,10 @@ class SampleIntegrationTest {
 
         assertTrue("兼职样表应有 14 行记录，实际 ${events.size}", events.size >= 14)
 
-        // 课节 ID（课节 number 列）→ sourceRecordId，且指纹按 ID
+        // 课节 ID（课节 number 列）→ sourceRecordId，且身份按 ID
         val first = events.first()
         assertNotNull("课节ID未识别", first.sourceRecordId)
-        assertEquals(EventFingerprint.partTimeWithId(first.sourceRecordId!!), first.eventFingerprint)
+        assertEquals(EventIdentity.partTimeIdentityKey(first.sourceRecordId!!), first.identityKey)
 
         // 待上课：起止时间从「上课时间」范围拆分
         val pending = events.first { it.status == CourseStatus.PENDING }

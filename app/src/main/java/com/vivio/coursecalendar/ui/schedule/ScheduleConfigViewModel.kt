@@ -84,15 +84,19 @@ class ScheduleConfigViewModel(
             return
         }
         viewModelScope.launch {
-            val periods = current.periods.map {
-                com.vivio.coursecalendar.domain.schedule.SchedulePeriod(
-                    it.number,
-                    java.time.LocalTime.of(it.startHour!!, it.startMinute!!),
-                    java.time.LocalTime.of(it.endHour!!, it.endMinute!!)
-                )
+            try {
+                val periods = current.periods.map {
+                    com.vivio.coursecalendar.domain.schedule.SchedulePeriod(
+                        it.number,
+                        java.time.LocalTime.of(it.startHour!!, it.startMinute!!),
+                        java.time.LocalTime.of(it.endHour!!, it.endMinute!!)
+                    )
+                }
+                repo.save(current.season, periods, current.version + 1)
+                _state.value = ScheduleUiState.Saved(current.season)
+            } catch (e: com.vivio.coursecalendar.data.repository.ScheduleValidationException) {
+                _state.value = ScheduleUiState.Failed(e.message ?: "作息配置不合法")
             }
-            repo.save(current.season, periods, current.version + 1)
-            _state.value = ScheduleUiState.Saved(current.season)
         }
     }
 

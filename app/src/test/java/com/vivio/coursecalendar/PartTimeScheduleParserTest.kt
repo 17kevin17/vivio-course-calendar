@@ -105,6 +105,6 @@ class PartTimeScheduleParserTest {
         val result = PartTimeScheduleParser().parse(wb, ParseContext("h"))
         val e = ((result as ParseResult.Success).events)[0]
         assertNull(e.sourceRecordId)
-        assertTrue(e.eventFingerprint.startsWith("P|RAW|"))
+        assertTrue(e.identityKey.startsWith("PART_TIME|FALLBACK|"))
     }
 }

@@ -20,33 +20,39 @@ enum class CourseStatus {
     UNKNOWN
 }
 
-/** 导入结果状态 */
+/** 导入结果状态（交接包《03》第五节差异结果） */
 enum class EventState {
-    /** 新事件 */
+    /** 找不到旧 identityKey */
     NEW,
 
-    /** 与已导入事件一致 */
+    /** identityKey 相同且 contentHash 相同 */
     UNCHANGED,
 
-    /** 内容或时间发生变化 */
+    /** identityKey 相同且 contentHash 不同 */
     MODIFIED,
 
-    /** 新课表明确标记取消 */
+    /** 上游明确标记取消 */
     CANCELLED,
 
-    /** 旧事件未出现在新文件中，仅提示不删除 */
+    /** 旧事件本次未出现，只提示不自动删除 */
     MISSING,
+
+    /** 多个旧事件都可能匹配，用户确认 */
+    AMBIGUOUS,
 
     /** 与其他事件时间冲突 */
     CONFLICT,
 
-    /** 缺少时间或核心字段，默认不导入 */
+    /** 时间或作息缺失，默认排除 */
     INVALID
 }
 
 /**
  * 统一事件模型：校内课表与兼职课表解析后的共同表示。
- * 对应交接包《03-数据模型与解析规范》第一节。
+ *
+ * 身份与内容分离（交接包《03》第一节）：
+ * - identityKey：跨批次稳定身份，回答「是不是同一个逻辑事件」；
+ * - contentHash：当前可见内容哈希，回答「内容是否变化」。
  */
 data class UnifiedEvent(
     val id: String = "",
@@ -60,7 +66,10 @@ data class UnifiedEvent(
     val status: CourseStatus = CourseStatus.PENDING,
     val reminderMinutes: Int? = null,
     val sourceFileHash: String? = null,
-    val eventFingerprint: String = "",
+    /** 跨批次稳定身份 */
+    val identityKey: String = "",
+    /** 内容哈希 */
+    val contentHash: String = "",
     val calendarEventId: Long? = null,
     val rawText: String? = null,
     /** 校内：大节编号 1..5 */
@@ -69,11 +78,13 @@ data class UnifiedEvent(
     val weekRange: String? = null,
     /** 校内：交叉校验用的节次串，如 "1-0102" */
     val periodCode: String? = null,
+    /** 校内：节次码中的周次（periodCode 前缀），如 1 */
+    val weekNo: Int? = null,
     val semester: String? = null,
-    /** 不可直接导入的原因（缺年份日期、未知状态、缺作息时间等）；非空时默认排除，用户确认后可强制导入 */
+    /** 不可直接导入的原因（缺年份日期、未知状态、缺作息时间等）；非空时默认排除 */
     val blocker: String? = null
 ) {
-    /** 生成应用内部稳定 ID：源 + 指纹前缀 */
+    /** 生成应用内部稳定 ID：源 + 身份前缀 */
     fun withId(): UnifiedEvent =
-        if (id.isBlank()) copy(id = "evt-${eventFingerprint.hashCode().toUInt().toString(16)}") else this
+        if (id.isBlank()) copy(id = "evt-${identityKey.hashCode().toUInt().toString(16)}") else this
 }

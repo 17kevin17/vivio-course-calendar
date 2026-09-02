@@ -15,7 +15,18 @@ captures/
 # 隐私：样表含真实学员/教师个人信息，不入库
 *.xls
 *.xlsx
+*.zip
 vivo_course_calendar_handoff.zip
+
+# 凭据：token 等敏感文件不入库
+token/
+.gh_pat.txt
 
 # 日志
 *.log
+
+# Robolectric 本地缓存
+.robo-home/
+
+# 未纳入构建的本地 jar（无引用）
+VSM-1.1.7.jar

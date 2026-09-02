@@ -4,26 +4,30 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
-import com.vivio.coursecalendar.data.local.dao.EventMappingDao
+import com.vivio.coursecalendar.data.local.dao.BatchEventActionDao
 import com.vivio.coursecalendar.data.local.dao.ImportBatchDao
+import com.vivio.coursecalendar.data.local.dao.ManagedEventDao
 import com.vivio.coursecalendar.data.local.dao.ScheduleConfigDao
-import com.vivio.coursecalendar.data.local.entity.EventMappingEntity
+import com.vivio.coursecalendar.data.local.entity.BatchEventActionEntity
 import com.vivio.coursecalendar.data.local.entity.ImportBatchEntity
+import com.vivio.coursecalendar.data.local.entity.ManagedEventEntity
 import com.vivio.coursecalendar.data.local.entity.ScheduleConfigEntity
 
 @Database(
     entities = [
         ScheduleConfigEntity::class,
         ImportBatchEntity::class,
-        EventMappingEntity::class
+        ManagedEventEntity::class,
+        BatchEventActionEntity::class
     ],
-    version = 1,
+    version = 3,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun scheduleConfigDao(): ScheduleConfigDao
     abstract fun importBatchDao(): ImportBatchDao
-    abstract fun eventMappingDao(): EventMappingDao
+    abstract fun managedEventDao(): ManagedEventDao
+    abstract fun batchEventActionDao(): BatchEventActionDao
 
     companion object {
         @Volatile
@@ -35,7 +39,11 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "vivio_calendar.db"
-                ).build().also { INSTANCE = it }
+                )
+                    // 未发布版本：作息主键与长期映射重构，直接清库重建（交接包《02》第五节策略）
+                    .fallbackToDestructiveMigration()
+                    .build()
+                    .also { INSTANCE = it }
             }
     }
 }

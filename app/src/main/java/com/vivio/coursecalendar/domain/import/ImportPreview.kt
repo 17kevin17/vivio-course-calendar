@@ -32,9 +32,9 @@ data class ImportPreview(
 
 /** 新课表中消失的旧事件 */
 data class MissingEvent(
+    val identityKey: String,
     val title: String,
-    val startMillis: Long,
-    val fingerprint: String
+    val startMillis: Long
 )
 
 /** 导入（或更新、撤销）执行后的汇总。 */

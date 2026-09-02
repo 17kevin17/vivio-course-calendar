@@ -6,8 +6,9 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
-import com.vivio.coursecalendar.data.local.entity.EventMappingEntity
+import com.vivio.coursecalendar.data.local.entity.BatchEventActionEntity
 import com.vivio.coursecalendar.data.local.entity.ImportBatchEntity
+import com.vivio.coursecalendar.data.local.entity.ManagedEventEntity
 import com.vivio.coursecalendar.data.local.entity.ScheduleConfigEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -42,34 +43,55 @@ interface ImportBatchDao {
 
     @Query("SELECT * FROM import_batch WHERE fileHash = :fileHash ORDER BY createdAt DESC LIMIT 1")
     suspend fun getLatestByFileHash(fileHash: String): ImportBatchEntity?
+
+    @Query("SELECT * FROM import_batch WHERE phase = :phase ORDER BY createdAt")
+    suspend fun getByPhase(phase: String): List<ImportBatchEntity>
 }
 
 @Dao
-interface EventMappingDao {
+interface ManagedEventDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertAll(mappings: List<EventMappingEntity>)
+    suspend fun insert(event: ManagedEventEntity): Long
 
-    @Query("SELECT * FROM event_mapping WHERE batchId = :batchId")
-    fun observeByBatch(batchId: Long): Flow<List<EventMappingEntity>>
+    @Update
+    suspend fun update(event: ManagedEventEntity)
 
-    @Query("SELECT * FROM event_mapping WHERE batchId = :batchId")
-    suspend fun getByBatch(batchId: Long): List<EventMappingEntity>
+    @Query("SELECT * FROM managed_event WHERE source = :source AND identityKey = :identityKey LIMIT 1")
+    suspend fun getByIdentity(source: String, identityKey: String): ManagedEventEntity?
 
-    @Query("SELECT * FROM event_mapping WHERE eventFingerprint = :fingerprint ORDER BY batchId DESC")
-    suspend fun getByFingerprint(fingerprint: String): List<EventMappingEntity>
+    @Query("SELECT * FROM managed_event WHERE source = :source AND status != 'BROKEN'")
+    suspend fun getActiveBySource(source: String): List<ManagedEventEntity>
 
-    @Query("SELECT * FROM event_mapping WHERE batchId = :batchId AND eventFingerprint = :fingerprint")
-    suspend fun getByBatchAndFingerprint(batchId: Long, fingerprint: String): EventMappingEntity?
+    @Query("SELECT * FROM managed_event")
+    suspend fun getAll(): List<ManagedEventEntity>
 
-    @Query("SELECT * FROM event_mapping")
-    suspend fun getAll(): List<EventMappingEntity>
+    @Query("SELECT * FROM managed_event WHERE calendarEventId = :calendarEventId")
+    suspend fun getByCalendarEventId(calendarEventId: Long): ManagedEventEntity?
 
-    @Query("SELECT * FROM event_mapping WHERE batchId = :batchId AND excluded = 0")
-    suspend fun getActiveByBatch(batchId: Long): List<EventMappingEntity>
+    @Query("SELECT * FROM managed_event WHERE id = :id")
+    suspend fun getById(id: Long): ManagedEventEntity?
+
+    @Query("SELECT * FROM managed_event WHERE lastSeenBatchId = :batchId")
+    suspend fun getByBatch(batchId: Long): List<ManagedEventEntity>
 
     @Delete
-    suspend fun delete(mapping: EventMappingEntity)
+    suspend fun delete(event: ManagedEventEntity)
+}
 
-    @Query("DELETE FROM event_mapping WHERE batchId = :batchId")
-    suspend fun deleteByBatch(batchId: Long)
+@Dao
+interface BatchEventActionDao {
+    @Insert
+    suspend fun insertAll(actions: List<BatchEventActionEntity>): LongArray
+
+    @Update
+    suspend fun update(action: BatchEventActionEntity)
+
+    @Query("SELECT * FROM batch_event_action WHERE batchId = :batchId ORDER BY id")
+    suspend fun getByBatch(batchId: Long): List<BatchEventActionEntity>
+
+    @Query("SELECT * FROM batch_event_action WHERE batchId = :batchId AND state = :state")
+    suspend fun getByBatchAndState(batchId: Long, state: String): List<BatchEventActionEntity>
+
+    @Query("SELECT * FROM batch_event_action WHERE state IN (:states) ORDER BY id")
+    suspend fun getByStates(states: List<String>): List<BatchEventActionEntity>
 }

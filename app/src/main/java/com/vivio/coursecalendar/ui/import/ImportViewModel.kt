@@ -93,7 +93,7 @@ class ImportViewModel(
         when (val outcome = importManager.parseAndPreview(bytes, fileName, season, schedule)) {
             is ImportManager.ParseOutcome.Previewed -> {
                 excludedSet.clear()
-                excludedSet.addAll(outcome.preview.items.filter { it.excluded }.map { it.event.eventFingerprint })
+                excludedSet.addAll(outcome.preview.items.filter { it.excluded }.map { it.event.identityKey })
                 _state.value = ImportUiState.PreviewReady(outcome.preview)
             }
             is ImportManager.ParseOutcome.Error -> {
@@ -107,11 +107,11 @@ class ImportViewModel(
     }
 
     /** 预览校对：切换某条事件的排除标记 */
-    fun toggleExclude(fingerprint: String) {
+    fun toggleExclude(identityKey: String) {
         val current = _state.value as? ImportUiState.PreviewReady ?: return
-        if (!excludedSet.add(fingerprint)) excludedSet.remove(fingerprint)
+        if (!excludedSet.add(identityKey)) excludedSet.remove(identityKey)
         _state.value = ImportUiState.PreviewReady(current.preview.copy(items = current.preview.items.map {
-            if (it.event.eventFingerprint == fingerprint) it.copy(excluded = fingerprint in excludedSet) else it
+            if (it.event.identityKey == identityKey) it.copy(excluded = identityKey in excludedSet) else it
         }))
     }
 

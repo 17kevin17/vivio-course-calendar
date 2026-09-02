@@ -15,7 +15,7 @@ class ConflictDetectorTest {
         title = title,
         startTime = LocalDateTime.parse(start),
         endTime = LocalDateTime.parse(end),
-        eventFingerprint = title
+        identityKey = title
     )
 
     @Test

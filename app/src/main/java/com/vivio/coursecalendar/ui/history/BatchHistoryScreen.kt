@@ -127,12 +127,12 @@ private fun BatchCard(batch: ImportBatchEntity, onUndo: () -> Unit) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    "新增 ${batch.createdCount}　更新 ${batch.updatedCount}　跳过 ${batch.invalidCount}${if (batch.status == "PARTIAL") "　部分失败" else ""}",
+                    "新增 ${batch.createdCount}　更新 ${batch.updatedCount}　跳过 ${batch.invalidCount}${if (batch.phase == "PARTIAL") "　部分失败" else ""}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            if (batch.status != "UNDONE") {
+            if (batch.phase != "UNDONE") {
                 Spacer(Modifier.width(8.dp))
                 TextButton(onClick = onUndo) { Text("撤销") }
             } else {

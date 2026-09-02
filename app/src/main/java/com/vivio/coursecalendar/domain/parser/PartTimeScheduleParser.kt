@@ -1,6 +1,6 @@
 package com.vivio.coursecalendar.domain.parser
 
-import com.vivio.coursecalendar.domain.import.EventFingerprint
+import com.vivio.coursecalendar.domain.identity.EventIdentity
 import com.vivio.coursecalendar.domain.model.CourseStatus
 import com.vivio.coursecalendar.domain.model.EventSource
 import com.vivio.coursecalendar.domain.model.UnifiedEvent
@@ -9,6 +9,7 @@ import org.apache.poi.ss.usermodel.CellType
 import org.apache.poi.ss.usermodel.DateUtil
 import org.apache.poi.ss.usermodel.Sheet
 import org.apache.poi.ss.usermodel.Workbook
+import org.apache.poi.xssf.usermodel.XSSFCell
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
@@ -53,12 +54,14 @@ class PartTimeScheduleParser : ScheduleParser {
             val row = sheet.getRow(r) ?: continue
             if (rowHasAnyData(row).not()) continue
 
-            val recordId = header.id?.let { cellText(row.getCell(it)) }?.takeIf { it.isNotBlank() }
+            val recordId = header.id?.let { readIdAsString(row.getCell(it)) }?.takeIf { it.isNotBlank() }
             val courseName = header.title?.let { cellText(row.getCell(it)) }?.trim().orEmpty()
             val student = header.student?.let { cellText(row.getCell(it)) }?.trim()
             val teacher = header.teacher?.let { cellText(row.getCell(it)) }?.trim()
             val statusRaw = header.status?.let { cellText(row.getCell(it)) }?.trim()
             val type = header.type?.let { cellText(row.getCell(it)) }?.trim()
+            // 兼职「学员排课」主表无教室列；线下表有「上课教室名称」留作扩展
+            val location: String? = null
 
             if (courseName.isBlank() && student.isNullOrBlank() && recordId.isNullOrBlank()) continue
 
@@ -71,12 +74,6 @@ class PartTimeScheduleParser : ScheduleParser {
             // 状态映射
             val status = mapStatus(statusRaw)
             if (status == CourseStatus.UNKNOWN) unknownStatusCount++
-
-            // 指纹：优先课节 ID
-            val fp = recordId?.let { EventFingerprint.partTimeWithId(it) }
-                ?: start?.let { s ->
-                    EventFingerprint.partTimeFallback(s, end ?: s.plusMinutes(45), student, courseName)
-                } ?: continue
 
             var blocker: String? = null
             var effectiveStart = start
@@ -95,6 +92,23 @@ class PartTimeScheduleParser : ScheduleParser {
                 blocker = "课节状态未知（$statusRaw），请确认"
             }
 
+            // 身份：优先课节 ID（无精度损失读取）；无 ID 时退化身份（低置信度）
+            val identityKey = when {
+                recordId != null -> EventIdentity.partTimeIdentityKey(recordId)
+                effectiveStart != null -> EventIdentity.partTimeFallbackIdentityKey(student, courseName, effectiveStart.toLocalDate())
+                else -> null
+            } ?: continue
+
+            val contentHash = EventIdentity.partTimeContentHash(
+                title = courseName.ifBlank { student ?: recordId ?: "未命名课节" },
+                student = student,
+                status = status.name,
+                start = effectiveStart ?: start ?: continue,
+                end = effectiveEnd ?: continue,
+                location = location,
+                reminderMinutes = null
+            )
+
             val description = buildString {
                 student?.let { append("学员：").append(it).append('\n') }
                 teacher?.let { append("主讲：").append(it).append('\n') }
@@ -107,11 +121,13 @@ class PartTimeScheduleParser : ScheduleParser {
                 sourceRecordId = recordId,
                 title = courseName.ifBlank { student ?: recordId ?: "未命名课节" },
                 description = description,
+                location = location,
                 startTime = effectiveStart ?: LocalDateTime.of(2000, 1, 1, 0, 0),
                 endTime = effectiveEnd ?: LocalDateTime.of(2000, 1, 1, 1, 0),
                 status = status,
                 sourceFileHash = context.sourceFileHash,
-                eventFingerprint = fp,
+                identityKey = identityKey,
+                contentHash = contentHash,
                 rawText = buildString {
                     listOf(courseName, student, teacher, statusRaw).filter { !it.isNullOrBlank() }
                         .forEach { append(it).append('\n') }
@@ -187,6 +203,24 @@ class PartTimeScheduleParser : ScheduleParser {
             if (cellText(row.getCell(c)).isNotBlank()) return true
         }
         return false
+    }
+
+    /**
+     * 课节 ID 无精度损失读取（交接包 T3）：
+     * - 字符串单元格直接返回；
+     * - OOXML 数值单元格优先读原始 XML 字符串（rawValue），避免经 Double 转换丢失精度；
+     * - 禁止 getNumericCellValue() → Double → Long → String 的路径。
+     */
+    private fun readIdAsString(cell: Cell?): String {
+        if (cell == null) return ""
+        return when (cell.cellType) {
+            CellType.STRING -> cell.stringCellValue.trim()
+            CellType.NUMERIC -> {
+                (cell as? XSSFCell)?.rawValue?.trim()?.takeIf { it.isNotBlank() }
+                    ?: java.math.BigDecimal(cell.numericCellValue).toBigInteger().toString()
+            }
+            else -> ""
+        }
     }
 
     private fun cellText(cell: Cell?): String {
