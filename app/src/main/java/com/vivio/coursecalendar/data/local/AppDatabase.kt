@@ -20,7 +20,7 @@ import com.vivio.coursecalendar.data.local.entity.ScheduleConfigEntity
         ManagedEventEntity::class,
         BatchEventActionEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {

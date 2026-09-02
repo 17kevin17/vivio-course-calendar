@@ -68,8 +68,8 @@ class CalendarWriter(private val context: Context) : CalendarGateway {
         return null
     }
 
-    /** 创建事件，返回系统日历事件 ID；失败返回 null。 */
-    override fun insertEvent(source: EventSource, event: UnifiedEvent): Long? {
+    /** 创建事件，返回系统日历事件 ID；失败返回 null。operationToken 写入同步字段 SYNC_DATA1（v2 R2）。 */
+    override fun insertEvent(source: EventSource, event: UnifiedEvent, operationToken: String?): Long? {
         val calendarId = ensureCalendar(source)
         if (calendarId < 0) return null
 
@@ -84,6 +84,8 @@ class CalendarWriter(private val context: Context) : CalendarGateway {
             put(CalendarContract.Events.EVENT_TIMEZONE, CourseTime.ZONE.id)
             put(CalendarContract.Events.EVENT_END_TIMEZONE, CourseTime.ZONE.id)
             put(CalendarContract.Events.STATUS, CalendarContract.Events.STATUS_CONFIRMED)
+            // v2 R2：跨存储幂等标识（需 vivo 真机验证 CalendarProvider 是否保留同步字段）
+            if (operationToken != null) put(CalendarContract.Events.SYNC_DATA1, operationToken)
         }
         val eventId = resolver.insert(CalendarContract.Events.CONTENT_URI, values)
             ?.lastPathSegment?.toLongOrNull()
@@ -146,7 +148,8 @@ class CalendarWriter(private val context: Context) : CalendarGateway {
             CalendarContract.Events.TITLE,
             CalendarContract.Events.DTSTART,
             CalendarContract.Events.DTEND,
-            CalendarContract.Events.EVENT_TIMEZONE
+            CalendarContract.Events.EVENT_TIMEZONE,
+            CalendarContract.Events.SYNC_DATA1
         )
         resolver.query(
             CalendarContract.Events.CONTENT_URI,
@@ -161,11 +164,46 @@ class CalendarWriter(private val context: Context) : CalendarGateway {
                     title = cursor.getString(1),
                     startMillis = cursor.getLong(2),
                     endMillis = cursor.getLong(3),
-                    eventTimezone = cursor.getString(4)
+                    eventTimezone = cursor.getString(4),
+                    operationToken = cursor.getString(5)
                 )
             }
         }
         return null
+    }
+
+    /** 按幂等标识查找系统事件（v2 R2）；命中多条时标记歧义，由调用方停止自动处理。 */
+    override fun findEventByOperationToken(token: String): CalendarEventSnapshot? {
+        if (token.isBlank()) return null
+        val projection = arrayOf(
+            CalendarContract.Events._ID,
+            CalendarContract.Events.TITLE,
+            CalendarContract.Events.DTSTART,
+            CalendarContract.Events.DTEND,
+            CalendarContract.Events.EVENT_TIMEZONE,
+            CalendarContract.Events.SYNC_DATA1
+        )
+        val matches = mutableListOf<CalendarEventSnapshot>()
+        resolver.query(
+            CalendarContract.Events.CONTENT_URI,
+            projection,
+            "${CalendarContract.Events.SYNC_DATA1} = ?",
+            arrayOf(token),
+            null
+        )?.use { cursor ->
+            while (cursor.moveToNext()) {
+                matches += CalendarEventSnapshot(
+                    calendarEventId = cursor.getLong(0),
+                    title = cursor.getString(1),
+                    startMillis = cursor.getLong(2),
+                    endMillis = cursor.getLong(3),
+                    eventTimezone = cursor.getString(4),
+                    operationToken = cursor.getString(5)
+                )
+            }
+        }
+        if (matches.isEmpty()) return null
+        return if (matches.size > 1) matches[0].copy(ambiguousTokenMatch = true) else matches[0]
     }
 
     private fun addReminder(eventId: Long, minutes: Int) {

@@ -31,11 +31,13 @@ import kotlinx.coroutines.test.runTest
 /** 内存日历网关：模拟 CalendarProvider，便于验证导入/撤销行为。 */
 private class FakeCalendarGateway : CalendarGateway {
     val events = mutableMapOf<Long, UnifiedEvent>()
+    val tokenByEvent = mutableMapOf<Long, String?>()
     private var nextId = 1L
     override fun ensureCalendar(source: EventSource): Long = 1L
-    override fun insertEvent(source: EventSource, event: UnifiedEvent): Long? {
+    override fun insertEvent(source: EventSource, event: UnifiedEvent, operationToken: String?): Long? {
         val id = nextId++
         events[id] = event
+        tokenByEvent[id] = operationToken
         return id
     }
     override fun updateEvent(source: EventSource, calendarEventId: Long, event: UnifiedEvent): Boolean {
@@ -43,7 +45,11 @@ private class FakeCalendarGateway : CalendarGateway {
         events[calendarEventId] = event
         return true
     }
-    override fun deleteEvent(calendarEventId: Long): Boolean = events.remove(calendarEventId) != null
+    override fun deleteEvent(calendarEventId: Long): Boolean {
+        val removed = events.remove(calendarEventId) != null
+        if (removed) tokenByEvent.remove(calendarEventId)
+        return removed
+    }
     override fun eventExists(calendarEventId: Long): Boolean = events.containsKey(calendarEventId)
     override fun getEvent(calendarEventId: Long): CalendarEventSnapshot? {
         val e = events[calendarEventId] ?: return null
@@ -52,8 +58,15 @@ private class FakeCalendarGateway : CalendarGateway {
             title = e.title,
             startMillis = CourseTime.toMillis(e.startTime),
             endMillis = CourseTime.toMillis(e.endTime),
-            eventTimezone = null
+            eventTimezone = null,
+            operationToken = tokenByEvent[calendarEventId]
         )
+    }
+    override fun findEventByOperationToken(token: String): CalendarEventSnapshot? {
+        val ids = tokenByEvent.filterValues { it == token }.keys
+        if (ids.isEmpty()) return null
+        val first = getEvent(ids.first())!!
+        return if (ids.size > 1) first.copy(ambiguousTokenMatch = true) else first
     }
 }
 
@@ -345,5 +358,44 @@ class ImportManagerTest {
         val all = db.managedEventDao().getAll()
         assertEquals(1, all.size)
         assertEquals("主键不得被重建", id1, all[0].id)
+    }
+
+    // ---------- R5：取消课重新开课生命周期 ----------
+
+    @Test
+    fun `取消课重新开课再取消的完整生命周期`() = runTest {
+        val e = event("英语", "pt001")
+
+        // 1) PENDING 导入 → CREATE，managed ACTIVE，日历 1
+        importManager.commit(preview(listOf(e)), null, emptySet())
+        assertEquals(1, gateway.events.size)
+        var me = db.managedEventDao().getByIdentity("PART_TIME", "pt001")!!
+        assertEquals("ACTIVE", me.status)
+
+        // 2) CANCELLED 导入 → CANCELLED/DELETE，managed CANCELLED，日历 0
+        val cancelled = e.copy(status = CourseStatus.CANCELLED)
+        val plan2 = diffEngine.compute(listOf(cancelled), EventSource.PART_TIME, null)
+        assertEquals(EventState.CANCELLED, plan2.items[0].state)
+        importManager.commit(preview(listOf(cancelled), mapOf("pt001" to EventState.CANCELLED)), null, emptySet())
+        assertEquals(0, gateway.events.size)
+        me = db.managedEventDao().getByIdentity("PART_TIME", "pt001")!!
+        assertEquals("CANCELLED", me.status)
+
+        // 3) PENDING 重新开课（同内容）→ R5：Diff 强制 MODIFIED → UPDATE 重建，managed ACTIVE，日历 1
+        val plan3 = diffEngine.compute(listOf(e), EventSource.PART_TIME, null)
+        assertEquals("CANCELLED 命中 PENDING 应强制 MODIFIED", EventState.MODIFIED, plan3.items[0].state)
+        importManager.commit(preview(listOf(e), mapOf("pt001" to EventState.MODIFIED)), null, emptySet())
+        assertEquals(1, gateway.events.size)
+        me = db.managedEventDao().getByIdentity("PART_TIME", "pt001")!!
+        assertEquals("ACTIVE", me.status)
+        assertTrue("重建后 managed 应持有新 calendarEventId", me.calendarEventId != null)
+
+        // 4) 再次取消 → DELETE，managed CANCELLED，日历 0
+        val plan4 = diffEngine.compute(listOf(cancelled), EventSource.PART_TIME, null)
+        assertEquals(EventState.CANCELLED, plan4.items[0].state)
+        importManager.commit(preview(listOf(cancelled), mapOf("pt001" to EventState.CANCELLED)), null, emptySet())
+        assertEquals(0, gateway.events.size)
+        me = db.managedEventDao().getByIdentity("PART_TIME", "pt001")!!
+        assertEquals("CANCELLED", me.status)
     }
 }

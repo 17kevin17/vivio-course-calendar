@@ -76,6 +76,8 @@ class DiffEngine(private val managedEventDao: ManagedEventDao) {
                     val existing = managedEventDao.getByIdentity(source.name, event.identityKey)
                     when {
                         existing == null -> EventState.NEW
+                        // R5：取消课重新开课（CANCELLED → PENDING）→ 强制 MODIFIED，即使内容未变也要恢复 ACTIVE
+                        existing.status == ManagedStatus.CANCELLED -> EventState.MODIFIED
                         existing.contentHash == event.contentHash -> EventState.UNCHANGED
                         else -> EventState.MODIFIED
                     }
@@ -144,9 +146,10 @@ class DiffEngine(private val managedEventDao: ManagedEventDao) {
         if (scope.dateFrom != null && date.isBefore(scope.dateFrom)) return false
         if (scope.dateTo != null && date.isAfter(scope.dateTo)) return false
         if (source == EventSource.UNIVERSITY && !scope.semester.isNullOrBlank()) {
-            // identityKey 形如 UNIVERSITY|<semester>|...，同学期匹配「|semester|」段
+            // identityKey 形如 UNIVERSITY|<semester>|...，按 "|" 分段精确比较第 2 段（学期），禁止松散 contains
             val compacted = com.vivio.coursecalendar.domain.identity.Normalizer.compact(scope.semester)
-            return me.identityKey.contains("|$compacted|")
+            val segment = me.identityKey.split("|").getOrNull(1)
+            return segment == compacted
         }
         return true
     }
