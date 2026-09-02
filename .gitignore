@@ -1,0 +1,21 @@
+# Gradle / Android
+.gradle/
+.kotlin/
+build/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# 隐私：样表含真实学员/教师个人信息，不入库
+*.xls
+*.xlsx
+vivo_course_calendar_handoff.zip
+
+# 日志
+*.log
