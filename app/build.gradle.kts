@@ -61,6 +61,12 @@ android {
         unitTests {
             isIncludeAndroidResources = true
             isReturnDefaultValues = true
+            all {
+                // Robolectric 缓存改到项目内，避免沙箱对用户目录 ~/.robolectric 的写限制
+                it.systemProperty("user.home", "${project.rootDir}/.robo-home")
+                // Room 在后台线程访问 SQLite，Legacy 实现有线程亲和问题，使用 NATIVE SQLite
+                it.systemProperty("robolectric.sqliteImplementation", "NATIVE")
+            }
         }
     }
 }
@@ -98,6 +104,8 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     testImplementation("org.robolectric:robolectric:4.14.1")
+    // NATIVE SQLite（Room 后台线程需要，Legacy 有线程亲和问题）
+    testImplementation("org.robolectric:nativeruntime:4.14.1")
     testImplementation("androidx.test:core-ktx:1.6.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }

@@ -56,9 +56,7 @@ class ImportManagerTest {
     @Before
     fun setUp() {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
-            .allowMainThreadQueries()
-            .build()
+        db = TestDb.inMemory(context)
         gateway = FakeCalendarGateway()
         importManager = ImportManager(db, ScheduleRepository(db), gateway)
         diffEngine = DiffEngine(db.managedEventDao())

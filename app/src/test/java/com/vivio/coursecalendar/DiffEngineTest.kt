@@ -33,9 +33,7 @@ class DiffEngineTest {
     @Before
     fun setUp() {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
-            .allowMainThreadQueries()
-            .build()
+        db = TestDb.inMemory(context)
         engine = DiffEngine(db.managedEventDao())
     }
 
