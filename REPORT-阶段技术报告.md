@@ -186,11 +186,12 @@ Room **version 3**（未发布版本，采用 `fallbackToDestructiveMigration` �
 
 | ID | 问题 | 状态 |
 |---|---|---|
-| F6 | MISSING 无导入范围（学期/日期窗口） | 待办 |
-| F7 | 提醒未进入最终哈希/快照 | 待办 |
-| F8 | Calendar 时区字段不统一 | 待办 |
-| F9 | managed_event 用 REPLACE | 待办 |
-| F10 | R8 规则过宽 + Release 真机验证 | 待办 |
+| F6 | MISSING 无导入范围（学期/日期窗口） | ✅ 完成 |
+| F7 | 提醒未进入最终哈希/快照 | ✅ 完成 |
+| F8 | Calendar 时区字段不统一 | ✅ 完成 |
+| F9 | managed_event 用 REPLACE | ✅ 完成 |
+| F10 | R8 规则过宽 | ✅ 规则收窄完成（见 14.1） |
+| F10 | Release 真机解析样表验证 | ⏸ 待真机（T10 冒烟时一并执行） |
 
 ---
 
@@ -204,8 +205,97 @@ Room **version 3**（未发布版本，采用 `fallbackToDestructiveMigration` �
 
 ## 十三、交接包要求的后续审查材料（更新）
 
-- ✅ 完整源码仓库 / 提交范围：本地 `main` @ `686490b`（GitHub 推送待网络恢复）
-- ✅ Room schema JSON：`app/schemas/com.vivio.coursecalendar.data.local.AppDatabase/3.json`（已导出）
-- ✅ 单元测试输出：`app/build/test-results/testDebugUnitTest/`（12 类 56 用例全绿）
-- ✅ Debug/Release 构建输出：app-debug.apk 24.33MB / app-release-unsigned.apk 5.79MB
+- ✅ 完整源码仓库 / 提交范围：本地 `main` @ `686490b`（GitHub 推送待网络恢复；F6-F10 改动未提交）
+- ✅ Room schema JSON：`app/schemas/com.vivio.coursecalendar.data.local.AppDatabase/4.json`（已导出，v4 新增 reminderMinutes）
+- ✅ 单元测试输出：`app/build/test-results/testDebugUnitTest/`（12 类 62 用例全绿）
+- ✅ Debug/Release 构建输出：app-debug.apk 24.33MB / app-release-unsigned.apk 5.80MB（F10 收窄后）
 - ⏸ vivo 真机测试记录：**尚未执行完成，明确标注待办**
+
+---
+
+## 十四、第三轮修复（v2 交接包 F6-F10 P1）已完成（真机验证待续）
+
+> 交接包：`handoff/vivo_course_calendar_integrity_handoff_v2/`
+> 提交范围：本地 `686490b` 之后未提交（改动见 14.2）
+
+### 14.1 修复清单与验证
+
+| ID | 问题 | 修复 | 验证 |
+|---|---|---|---|
+| F6 | MISSING 无导入范围 | 新增 `ImportScope`（semester/dateFrom/dateTo/isCompleteSnapshot）；DiffEngine `compute` 增加 `scope` 参数，MISSING 事件按学期/日期窗口过滤，避免跨学期误标 | DiffEngineTest 新增 3 用例：局部日期范围不影响范围外事件、范围内缺失仍提示不自动删除、导入新学期不把旧学期标成 MISSING |
+| F7 | 提醒未进入最终哈希/快照 | `UnifiedEvent.withFinalReminder` 按 source 重算 contentHash 并写入最终 reminderMinutes；ImportManager commit 应用最终提醒，UPDATE 分支持久化 reminderMinutes；managed_event 新增列 | ImportManagerTest 新增 2 用例：改提醒→MODIFIED 且 managed 哈希与最终提醒一致、同提醒重复导入不产生更新 |
+| F8 | Calendar 时区字段不统一 | CalendarWriter 的 DTSTART/DTEND 解释与 `EVENT_TIMEZONE`/`EVENT_END_TIMEZONE` 均统一为 `CourseTime.ZONE`（Asia/Shanghai） | 字段核对 |
+| F9 | managed_event 用 REPLACE | `AppDao.insert` 去 REPLACE 改为 ABORT；ImportManager 新增 `upsertManaged`（先查后 insert/update，保留原主键与 createdAt） | ImportManagerTest 新增 1 用例：重复插入不 REPLACE 重建主键 |
+| F10 | R8 规则过宽 | 基于 `build/outputs/mapping/release/missing_rules.txt` 将宽泛 `-dontwarn`（org.apache.poi.** / org.apache.commons.** / java.awt.** 等 13 条通配）收窄为 **700 条精确类清单**；删除本就不触发告警的宽规则（org.apache.poi.**、org.apache.commons.**、org.etsi.**、org.apache.logging.log4j.**、com.graphbuilder.**） | `assembleRelease` BUILD SUCCESSFUL（2m6s）；R8 缺失类告警 **0**（missing_rules.txt 不再生成）；APK 5.80MB；仅剩 1 条非阻断类型检查告警（`SVGUserAgent.getViewbox()`，POI 的 SVG 渲染可选功能，运行时不用） |
+
+### 14.2 改动文件
+
+- 领域层：`domain/import/ImportPreview.kt`（ImportScope）、`domain/import/DiffEngine.kt`（scope 过滤）、`domain/import/ImportManager.kt`（withFinalReminder/upsertManaged）、`domain/model/UnifiedEvent.kt`（withFinalReminder + teacher/student 扩展）、`domain/calendar/CalendarWriter.kt`（时区统一）
+- 数据层：`data/local/entity/ManagedEventEntity.kt`（reminderMinutes）、`data/local/dao/AppDao.kt`（去 REPLACE）、`data/local/AppDatabase.kt`（v3→v4）
+- R8：`proguard-rules.pro`（精确 -dontwarn 收窄）
+
+### 14.3 测试规模
+
+- 修复前 56 用例（12 类）→ 修复后 **62 用例（12 类）全绿**（0 fail / 0 err），本轮 +6：
+  - DiffEngineTest +3（F6）
+  - ImportManagerTest +3（F7×2、F9×1）
+
+### 14.4 数据库 schema v4
+
+`managed_event` 新增 `reminderMinutes` 列（版本 3→4，沿用 `fallbackToDestructiveMigration` 清库重建策略，未发布版本）。
+
+### 14.5 尚未验证（真机依赖，F10 剩余部分）
+
+- Release 构建在 vivo 真机解析两类样表（F10 完成标准）
+- 提醒修改后的系统日历提醒同步
+- R8 收窄后 Release 运行（临时测试签名安装）
+
+### 14.6 R8 收窄说明
+
+- 无法按类精确收窄的规则已随精确清单一并覆盖，均注明触发来源为 POI/xmlbeans 可选依赖（java.awt、javax.imageio、pdfbox、batik、saxon、javaparser、bouncycastle、ant、maven、osgi、xml-security 等），Android 运行时不存在且不调用，仅被可选功能引用。
+- 保留 POI/xmlbeans/microsoft.schemas/openxmlformats 的 `-keep`（运行时必需，不可混淆）。
+- 兜底：Release 真机解析样表验证。
+
+---
+
+## 十五、综合审查（v2 F1-F10 全量复核）
+
+> 审查范围：`f1f3bc0` ~ 当前工作区（F1-F10 全部改动），对照《01》验收标准 /《02》设计 /《04》测试矩阵。
+> 审查方式：逐文件核对源码 + 双子代理交叉验证（2/2 一致）。
+
+### 15.1 验收标准对照
+
+| ID | 完成标准 | 结论 |
+|---|---|---|
+| F1 | 解析→预览仍为 136 条 | ✅ identityKey 唯一 136（F1DiagnosisTest）；重复 key 显式标 AMBIGUOUS，不静默丢弃 |
+| F2 | 已存在取消→CANCELLED；不存在→忽略 | ✅ DiffEngine 状态优先于哈希；不存在→excluded UNCHANGED，不创建 |
+| F3 | 任意动作后中断均可继续 | ✅ undo 跳过 REVERTED；DELETE 重建立即保存新 ID，幂等 |
+| F4 | 启动自动扫描 | ✅ VivioApp.onCreate → importManager.recover() |
+| F5 | CREATE/UPDATE/DELETE 均可核对真实状态 | ✅ eventExists/getEvent + recoverCreate/Update/Delete 三路径 |
+| F6 | 只在同学期/日期窗口内计算 MISSING | ✅ ImportScope + DiffEngine.inScope（见 15.2 Issue2） |
+| F7 | 改提醒→MODIFIED，撤销恢复旧提醒 | ✅ withFinalReminder 重算 hash；managed 持久化；undo 恢复旧提醒（见 15.2 Issue3） |
+| F8 | DTSTART/DTEND 与 EVENT_TIMEZONE 统一 Asia/Shanghai | ✅ CalendarWriter 插入/更新均统一 CourseTime.ZONE |
+| F9 | 明确 insert/update/upsert，避免主键重建 | ✅ DAO 去 REPLACE + upsertManaged 先查后写 |
+| F10 | Release 运行样表 + 收窄 dontwarn | ✅ R8 规则收窄（700 精确类，缺失类告警 0）；真机运行待 T10 |
+
+### 15.2 发现的问题（双代理已验证）
+
+| No. | 严重度 | 问题 | 位置 | 建议 |
+|---|---|---|---|---|
+| 1 | Major | 取消事件"粘性"：已 CANCELLED 的 managed 行被同内容 PENDING 事件判为 UNCHANGED→NOOP，已取消课程无法重导恢复；且 UPDATE 分支 `existing.copy(...)` 未重置 status=ACTIVE，对 CANCELLED 行重建系统事件后 managed 仍标 CANCELLED，状态不一致 | DiffEngine.kt L76-82；ImportManager.kt L256-269 | ① PENDING 命中 CANCELLED 行不再判 UNCHANGED（视为恢复/重建）；② UPDATE 分支 update 增加 `status = ACTIVE` |
+| 2 | Minor | F6 inScope 用 `contains("\|semester\|")` 松散子串匹配身份段，理论上可能误匹配课程名等其它段 | DiffEngine.kt L146-150 | 按 "\|" 拆分 identityKey 取第 2 段（学期）精确比较 |
+| 3 | Low | F7 `reminderMinutes ?: this.reminderMinutes` 依赖"解析器恒产出 null"的隐含约定；当前流程"关闭"可正确清除提醒（回退仍 null→hash 变→MODIFIED），但未来若解析器携带默认提醒则"关闭"失效 | UnifiedEvent.kt L97 | 显式区分"未设置/显式关闭"，或注释说明该约定 |
+
+### 15.3 测试矩阵（《04》）逐条对照
+
+- 已覆盖：136 条链路（F1DiagnosisTest）、身份/取消/撤销中断/执行恢复/导入范围/提醒 MODIFIED/数据库约束均有对应用例。
+- 未单测（逻辑已实现，建议补）：
+  - 《04》七节「撤销恢复 10 分钟提醒」：undo UPDATE 已恢复 `before.reminderMinutes`（ImportManager.kt L366），无独立用例。
+  - 《04》八节「fallback destructive migration 仅限未发布构建」：设计约定，无单测。
+
+### 15.4 审查结论
+
+- F1-F10 验收标准全部达成（F10 真机解析待 T10 冒烟一并执行）。
+- 全量 12 类 62 用例全绿；Release 构建通过、R8 缺失类告警 0。
+- Issue1 超出交接包验收范围（交接包未要求"取消后重导恢复"），属数据一致性建议项，建议顺手修复后再提交。
+- Issue2/Issue3 为低风险健壮性建议，不影响当前验收。
