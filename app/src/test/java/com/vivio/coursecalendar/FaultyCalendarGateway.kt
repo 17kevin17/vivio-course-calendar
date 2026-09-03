@@ -41,6 +41,14 @@ class FaultyCalendarGateway : CalendarGateway {
     var crashAfterNextInsert = false
     var crashAfterNextDelete = false
 
+    // U3：单次提醒写入失败注入（insert 后事件 reminder 被清空，模拟 provider 未保存提醒）
+    var dropReminderAfterNextInsert = false
+
+    // U5：单次权限异常注入（抛 SecurityException，模拟日历权限被撤销）
+    var throwSecurityOnNextInsert = false
+    var throwSecurityOnNextUpdate = false
+    var throwSecurityOnNextDelete = false
+
     // 视为重复 token 的集合：find 时标记歧义
     val ambiguousTokens = mutableSetOf<String>()
 
@@ -48,12 +56,21 @@ class FaultyCalendarGateway : CalendarGateway {
 
     override fun insertEvent(source: EventSource, event: UnifiedEvent, operationToken: String?): Long? {
         insertCalls++
+        if (throwSecurityOnNextInsert) {
+            throwSecurityOnNextInsert = false
+            throw SecurityException("simulated calendar permission revoked")
+        }
         if (nextInsertShouldFail) {
             nextInsertShouldFail = false
             return null
         }
         val id = nextId++
-        events[id] = event
+        var stored = event
+        if (dropReminderAfterNextInsert) {
+            dropReminderAfterNextInsert = false
+            stored = event.copy(reminderMinutes = null)
+        }
+        events[id] = stored
         tokenByEvent[id] = operationToken
         if (crashAfterNextInsert) {
             crashAfterNextInsert = false
@@ -64,6 +81,10 @@ class FaultyCalendarGateway : CalendarGateway {
 
     override fun updateEvent(source: EventSource, calendarEventId: Long, event: UnifiedEvent): Boolean {
         updateCalls++
+        if (throwSecurityOnNextUpdate) {
+            throwSecurityOnNextUpdate = false
+            throw SecurityException("simulated calendar permission revoked")
+        }
         if (nextUpdateShouldFail) {
             nextUpdateShouldFail = false
             return false
@@ -75,6 +96,10 @@ class FaultyCalendarGateway : CalendarGateway {
 
     override fun deleteEvent(calendarEventId: Long): Boolean {
         deleteCalls++
+        if (throwSecurityOnNextDelete) {
+            throwSecurityOnNextDelete = false
+            throw SecurityException("simulated calendar permission revoked")
+        }
         if (nextDeleteShouldFail) {
             nextDeleteShouldFail = false
             return false
