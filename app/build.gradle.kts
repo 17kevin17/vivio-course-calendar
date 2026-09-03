@@ -13,8 +13,8 @@ android {
         applicationId = "com.vivio.coursecalendar"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0-rc1"
 
         // 导出 Room schema JSON 供审查（交接包要求提供 schema 材料）
         ksp {
