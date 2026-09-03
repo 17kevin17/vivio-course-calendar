@@ -219,7 +219,15 @@ class ImportManager(
             when (action.actionType) {
                 BatchActionType.CREATE -> {
                     // N1：统一幂等入口（先按 token 找回，未找到才插入）
-                    val result = findOrInsertByToken(preview.source, event, action.operationToken)
+                    // U5：Provider 权限异常不得崩溃，动作落 FAILED
+                    val result = try {
+                        findOrInsertByToken(preview.source, event, action.operationToken)
+                    } catch (e: SecurityException) {
+                        action = action.copy(state = BatchActionState.FAILED, errorCode = "PROVIDER_ACCESS_DENIED")
+                        batchActionDao.update(action)
+                        failed++
+                        continue
+                    }
                     val cid = when (result) {
                         CalendarInsertResult.Ambiguous -> {
                             action = action.copy(state = BatchActionState.FAILED, errorCode = "TOKEN_AMBIGUOUS")
@@ -235,6 +243,16 @@ class ImportManager(
                         }
                         is CalendarInsertResult.Found -> result.calendarEventId
                         is CalendarInsertResult.Created -> result.calendarEventId
+                    }
+                    // U3：插入后回读核验提醒，未同步不得假成功（事件已创建，recover 可经 token 找回，不重复）
+                    if (event.reminderMinutes != null) {
+                        val snap = try { calendarWriter.getEvent(cid) } catch (e: SecurityException) { null }
+                        if (snap == null || snap.reminderMinutes != event.reminderMinutes) {
+                            action = action.copy(state = BatchActionState.FAILED, errorCode = "REMINDER_MISMATCH")
+                            batchActionDao.update(action)
+                            failed++
+                            continue
+                        }
                     }
                     action = action.copy(state = BatchActionState.CALENDAR_APPLIED, calendarEventIdAfter = cid)
                     batchActionDao.update(action)
@@ -376,7 +394,12 @@ class ImportManager(
         for (action in actions) {
             // v2 F3：已恢复的动作跳过，中断后可安全重试
             if (action.state == BatchActionState.REVERTED) continue
-            val r = revertAction(action, batch.sourceOf())
+            // U5：Provider 权限异常不得崩溃，动作落 REVERT_FAILED
+            val r = try {
+                revertAction(action, batch.sourceOf())
+            } catch (e: SecurityException) {
+                failAction(action, BatchActionState.REVERT_FAILED, "PROVIDER_ACCESS_DENIED")
+            }
             if (r.ok) {
                 // 逆操作成功 → 立即标记 REVERTED
                 batchActionDao.update(action.copy(state = BatchActionState.REVERTED))
@@ -453,9 +476,10 @@ class ImportManager(
                 action.state == BatchActionState.REVERT_FAILED
             ) continue
             when (action.actionType) {
-                BatchActionType.CREATE -> applyCreate(batch, action)
-                BatchActionType.UPDATE -> applyUpdate(batch, action)
-                BatchActionType.DELETE -> applyDelete(action)
+                // U5：Provider 权限异常不得崩溃，动作落 FAILED
+                BatchActionType.CREATE -> try { applyCreate(batch, action) } catch (e: SecurityException) { failAction(action, BatchActionState.FAILED, "PROVIDER_ACCESS_DENIED") }
+                BatchActionType.UPDATE -> try { applyUpdate(batch, action) } catch (e: SecurityException) { failAction(action, BatchActionState.FAILED, "PROVIDER_ACCESS_DENIED") }
+                BatchActionType.DELETE -> try { applyDelete(action) } catch (e: SecurityException) { failAction(action, BatchActionState.FAILED, "PROVIDER_ACCESS_DENIED") }
                 BatchActionType.NOOP, BatchActionType.MARK_MISSING ->
                     batchActionDao.update(action.copy(state = BatchActionState.DB_APPLIED))
             }
@@ -470,7 +494,12 @@ class ImportManager(
                 action.state == BatchActionState.REVERT_FAILED ||
                 action.state == BatchActionState.FAILED
             ) continue
-            val r = revertAction(action, batch.sourceOf())
+            // U5：Provider 权限异常不得崩溃，动作落 REVERT_FAILED
+            val r = try {
+                revertAction(action, batch.sourceOf())
+            } catch (e: SecurityException) {
+                failAction(action, BatchActionState.REVERT_FAILED, "PROVIDER_ACCESS_DENIED")
+            }
             if (r.ok) batchActionDao.update(action.copy(state = BatchActionState.REVERTED))
         }
         return summarizeBatchPhase(batch.id, Direction.UNDO)
@@ -547,7 +576,11 @@ class ImportManager(
         val me = action.managedEventId?.let { managedEventDao.getById(it) }
         // N3：撤销“恢复开课”（原 CANCELLED、原无系统事件）→ 删除 after 新事件，恢复 CANCELLED/null
         if (before.status == CourseStatus.CANCELLED && cid == null) {
-            action.calendarEventIdAfter?.let { calendarWriter.deleteEvent(it) }
+            val afterCid = action.calendarEventIdAfter
+            // U1：删除后必须核验真实状态；删除未生效不得标 REVERTED
+            if (afterCid != null && !deleteAndConfirm(afterCid)) {
+                return failAction(action, BatchActionState.REVERT_FAILED, "CALENDAR_DELETE_NOT_EFFECTIVE")
+            }
             if (me != null) {
                 managedEventDao.update(
                     me.copy(status = ManagedStatus.CANCELLED, calendarEventId = null, updatedAt = System.currentTimeMillis())
@@ -582,28 +615,42 @@ class ImportManager(
         return ActionResult.OK
     }
 
-    /** 撤销 DELETE：重建系统事件（token 幂等，不重复创建）并恢复 managed ACTIVE。 */
+    /** 撤销 DELETE：重建系统事件（token 幂等，不重复创建）并恢复 managed ACTIVE（U2/U4）。 */
     private suspend fun revertDelete(action: BatchEventActionEntity, source: EventSource): ActionResult {
-        val before = EventSnapshot.fromJson(action.beforeSnapshot) ?: return ActionResult.fail("SNAPSHOT_MISSING")
-        // N1：已保存重建后的 ID 直接复用；否则经统一幂等入口（token 已由 commit 预持久化），避免重复 insert
+        val before = EventSnapshot.fromJson(action.beforeSnapshot)
+            ?: return failAction(action, BatchActionState.REVERT_FAILED, "SNAPSHOT_MISSING")
         val newCid: Long = when {
-            action.calendarEventIdAfter != null -> action.calendarEventIdAfter
+            action.calendarEventIdAfter != null -> {
+                val saved = action.calendarEventIdAfter
+                val snap = calendarWriter.getEvent(saved)
+                when {
+                    snap == null -> {
+                        // U2：重建后事件已被删除 → 用同一 token 重建，不直接复用无效 ID
+                        when (val r = findOrInsertByToken(source, before, action.operationToken)) {
+                            CalendarInsertResult.Ambiguous -> return failAction(action, BatchActionState.REVERT_FAILED, "TOKEN_AMBIGUOUS")
+                            is CalendarInsertResult.Failed -> return failAction(action, BatchActionState.REVERT_FAILED, "CALENDAR_INSERT_FAILED")
+                            is CalendarInsertResult.Found -> {
+                                batchActionDao.update(action.copy(calendarEventIdAfter = r.calendarEventId))
+                                r.calendarEventId
+                            }
+                            is CalendarInsertResult.Created -> {
+                                batchActionDao.update(action.copy(calendarEventIdAfter = r.calendarEventId))
+                                r.calendarEventId
+                            }
+                        }
+                    }
+                    snap.matchesVisibleFields(before) -> saved
+                    else -> return failAction(action, BatchActionState.REVERT_FAILED, "RECOVER_CONTENT_MISMATCH")
+                }
+            }
             else -> when (val result = findOrInsertByToken(source, before, action.operationToken)) {
-                CalendarInsertResult.Ambiguous -> {
-                    batchActionDao.update(action.copy(state = BatchActionState.REVERT_FAILED, errorCode = "TOKEN_AMBIGUOUS"))
-                    return ActionResult.fail("TOKEN_AMBIGUOUS")
-                }
-                is CalendarInsertResult.Failed -> {
-                    batchActionDao.update(action.copy(state = BatchActionState.REVERT_FAILED, errorCode = "CALENDAR_INSERT_FAILED"))
-                    return ActionResult.fail("CALENDAR_INSERT_FAILED")
-                }
+                CalendarInsertResult.Ambiguous -> return failAction(action, BatchActionState.REVERT_FAILED, "TOKEN_AMBIGUOUS")
+                is CalendarInsertResult.Failed -> return failAction(action, BatchActionState.REVERT_FAILED, "CALENDAR_INSERT_FAILED")
                 is CalendarInsertResult.Found -> {
-                    // 按 token 找回：写回 ID（token 已持久化，无需再写）
                     batchActionDao.update(action.copy(calendarEventIdAfter = result.calendarEventId))
                     result.calendarEventId
                 }
                 is CalendarInsertResult.Created -> {
-                    // 首次重建成功立即写回 ID，避免中断后重复 insert
                     batchActionDao.update(action.copy(calendarEventIdAfter = result.calendarEventId))
                     result.calendarEventId
                 }
@@ -625,7 +672,8 @@ class ImportManager(
 
     /** 正向 CREATE 恢复：已有 cid 时核对真实状态（F5）；无 cid 时按 token 找回（R2），未找到才插入，不重复创建。 */
     private suspend fun applyCreate(batch: ImportBatchEntity, action: BatchEventActionEntity): ActionResult {
-        val after = EventSnapshot.fromJson(action.afterSnapshot) ?: return ActionResult.fail("RECOVER_NO_SNAPSHOT")
+        val after = EventSnapshot.fromJson(action.afterSnapshot)
+            ?: return failAction(action, BatchActionState.FAILED, "RECOVER_NO_SNAPSHOT")
         val event = after.copy(source = batch.sourceOf())
         // 情况 A：日历操作已发生（CALENDAR_APPLIED 且 cid 已落库）→ 核对系统真实状态，不重复插入
         if (action.calendarEventIdAfter != null) {
@@ -682,7 +730,7 @@ class ImportManager(
         val cid = action.calendarEventIdBefore
         if (cid == null) {
             // N6：UPDATE 重建路径（原无系统事件，如取消后恢复开课）→ 按 token 找回 after 新事件，未找到才插入
-            val target = after ?: return ActionResult.fail("RECOVER_NO_SNAPSHOT")
+            val target = after ?: return failAction(action, BatchActionState.FAILED, "RECOVER_NO_SNAPSHOT")
             return when (val r = findOrInsertByToken(batch.sourceOf(), target, action.operationToken)) {
                 CalendarInsertResult.Ambiguous -> {
                     batchActionDao.update(action.copy(state = BatchActionState.FAILED, errorCode = "TOKEN_AMBIGUOUS"))
@@ -730,7 +778,10 @@ class ImportManager(
             }
             matchesBefore -> {
                 // 系统仍是旧状态：安全重试 UPDATE
-                val ok = calendarWriter.updateEvent(batch.sourceOf(), cid, after ?: return ActionResult.fail("RECOVER_NO_SNAPSHOT"))
+                val ok = calendarWriter.updateEvent(
+                    batch.sourceOf(), cid,
+                    after ?: return failAction(action, BatchActionState.FAILED, "RECOVER_NO_SNAPSHOT")
+                )
                 if (!ok) {
                     batchActionDao.update(action.copy(state = BatchActionState.FAILED, errorCode = "RECOVER_UPDATE_FAILED"))
                     return ActionResult.fail("RECOVER_UPDATE_FAILED")
@@ -871,6 +922,18 @@ class ImportManager(
     private fun UnifiedEvent.millisEnd(): Long = CourseTime.toMillis(endTime)
 
     private fun ImportBatchEntity.sourceOf(): EventSource = EventSource.valueOf(source)
+
+    /** U1：删除并回读核验真实状态；仅当事件确认不存在才返回 true。 */
+    private suspend fun deleteAndConfirm(calendarEventId: Long): Boolean {
+        calendarWriter.deleteEvent(calendarEventId)
+        return !calendarWriter.eventExists(calendarEventId)
+    }
+
+    /** U4：统一失败状态持久化，禁止恢复函数裸返回 fail。 */
+    private suspend fun failAction(action: BatchEventActionEntity, state: String, errorCode: String): ActionResult {
+        batchActionDao.update(action.copy(state = state, errorCode = errorCode))
+        return ActionResult.fail(errorCode)
+    }
 
     /** N2：完整可见字段比较（标题/地点/描述/起止时间/提醒/时区），避免仅按时间误判。 */
     private fun CalendarEventSnapshot.matchesVisibleFields(e: UnifiedEvent): Boolean {

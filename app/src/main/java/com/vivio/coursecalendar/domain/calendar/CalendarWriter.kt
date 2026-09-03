@@ -92,6 +92,10 @@ class CalendarWriter(private val context: Context) : CalendarGateway {
             ?: return null
 
         event.reminderMinutes?.let { addReminder(eventId, it) }
+        // U3：插入后回读核验提醒；未同步时返回 null（事件已创建，调用方可用 token 找回，不重复创建）
+        if (event.reminderMinutes != null && readReminderMinutes(eventId) != event.reminderMinutes) {
+            return null
+        }
         return eventId
     }
 
