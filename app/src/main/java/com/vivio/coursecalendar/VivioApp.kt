@@ -1,6 +1,8 @@
 package com.vivio.coursecalendar
 
+import android.Manifest
 import android.app.Application
+import android.content.pm.PackageManager
 import com.vivio.coursecalendar.data.local.AppDatabase
 import com.vivio.coursecalendar.data.repository.ScheduleRepository
 import com.vivio.coursecalendar.domain.calendar.CalendarWriter
@@ -30,11 +32,19 @@ class VivioApp : Application() {
         // 首次安装写入内置作息配置（春/夏）
         appScope.launch { container.scheduleRepository.seedDefaultsIfEmpty() }
         // v2 F4：启动时执行一次故障恢复（IO 协程，不阻塞主线程）
-        appScope.launch {
-            val recovered = container.importManager.recover()
-            if (recovered > 0) {
-                android.util.Log.i("VivioApp", "启动恢复：处理 $recovered 个未完成批次")
+        // U5：恢复前检查日历权限；无权限时跳过 Provider 恢复，避免 SecurityException 崩溃
+        if (hasCalendarPermission()) {
+            appScope.launch {
+                val recovered = container.importManager.recover()
+                if (recovered > 0) {
+                    android.util.Log.i("VivioApp", "启动恢复：处理 $recovered 个未完成批次")
+                }
             }
         }
+    }
+
+    private fun hasCalendarPermission(): Boolean {
+        return checkSelfPermission(Manifest.permission.READ_CALENDAR) == PackageManager.PERMISSION_GRANTED &&
+            checkSelfPermission(Manifest.permission.WRITE_CALENDAR) == PackageManager.PERMISSION_GRANTED
     }
 }

@@ -123,8 +123,15 @@ class ImportViewModel(
         val current = _state.value as? ImportUiState.PreviewReady ?: return
         _state.value = ImportUiState.Loading
         viewModelScope.launch {
-            val result = importManager.commit(current.preview, reminderMinutes, excludedSet)
-            _state.value = ImportUiState.Done(current.preview, result)
+            try {
+                val result = importManager.commit(current.preview, reminderMinutes, excludedSet)
+                _state.value = ImportUiState.Done(current.preview, result)
+            } catch (e: SecurityException) {
+                // U5：日历权限被撤销 → 提示重新授权
+                _state.value = ImportUiState.Failed("缺少日历读写权限，请到系统设置中允许后重试", current.preview.fileName, null)
+            } catch (e: Exception) {
+                _state.value = ImportUiState.Failed("导入失败：${e.message ?: "未知错误"}", current.preview.fileName, null)
+            }
         }
     }
 
